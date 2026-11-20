@@ -27,6 +27,18 @@ namespace {
   using config_option_e = config::video_t::dd_t::config_option_e;
   using device_prep_t = display_device::SingleDisplayConfiguration::DevicePreparation;
 
+  /** @brief Model an active Windows display with a distinct stable ID and desktop position.
+   * @param id Device and capture output identifier.
+   * @param primary Whether Windows marks the display as primary.
+   * @param x Horizontal desktop origin.
+   * @return Active display for stream mode and layout tests.
+   */
+  display_device::EnumeratedDevice active_display(std::string id, bool primary, int x) {
+    return {.m_device_id = id, .m_display_name = id, .m_info = display_device::EnumeratedDevice::Info {
+      .m_primary = primary, .m_origin_point = {x, 0}
+    }};
+  }
+
   using hdr_option_e = config::video_t::dd_t::hdr_option_e;
   using hdr_state_e = display_device::HdrState;
 
@@ -557,7 +569,18 @@ namespace {
       return device_id;
     }
 
-    [[nodiscard]] ApplyResult applySettings(const display_device::SingleDisplayConfiguration &) override {
+    [[nodiscard]] ApplyResult applySettings(const display_device::SingleDisplayConfiguration &config) override {
+      if (config.m_device_prep == device_prep_t::EnsureOnlyDisplay) {
+        std::lock_guard lock {mutex};
+        saved_layout = devices;
+        for (auto &device : devices) {
+          if (device.m_device_id != config.m_device_id) {
+            device.m_info.reset();
+          } else {
+            device.m_info->m_primary = true;
+          }
+        }
+      }
       return ApplyResult::Ok;
     }
 
@@ -570,6 +593,9 @@ namespace {
       }
 
       pending_saved = !persistence->clear();
+      if (!saved_layout.empty()) {
+        devices = std::move(saved_layout);
+      }
       hdr_restored = !pending_saved;
       restored.notify_all();
       return RevertResult::Ok;
@@ -645,6 +671,7 @@ namespace {
     display_device::EnumeratedDeviceList devices {
       {.m_device_id = "panel", .m_friendly_name = "Panel"}
     };  ///< Displays currently connected.
+    display_device::EnumeratedDeviceList saved_layout;  ///< Layout to restore after only-display preparation.
     int revert_calls {0};  ///< Number of revert attempts performed.
     bool keep_pending {true};  ///< When true, a successful revert still leaves the saved record in place.
     bool pending_saved {false};  ///< True when the latest revert left a saved record.
@@ -677,6 +704,50 @@ namespace {
 }  // namespace
 
 using namespace std::chrono_literals;
+
+TEST(DisplayStreamMode, DistinguishesPrimaryExtendedAndOnlyDisplayChoices) {
+  using enum display_device::stream_mode_e;
+  display_device::EnumeratedDeviceList devices {active_display("main", true, 0), active_display("virtual", false, 1920)};
+  EXPECT_EQ(display_device::select_stream_display(primary, devices, "virtual").device_id, "main");
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "virtual").device_id, "virtual");
+  EXPECT_EQ(display_device::select_stream_display(secondary, devices, "virtual").device_id, "virtual");
+  EXPECT_EQ(display_device::select_stream_display(secondary, devices, "").reason, "secondary_display_unavailable");
+  devices.push_back(active_display("other", false, -1920));
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "virtual").device_id, "virtual");
+  EXPECT_EQ(display_device::select_stream_display(secondary, devices, "virtual").reason, "other_displays_active");
+  devices[1].m_info->m_origin_point = devices[0].m_info->m_origin_point;
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "virtual").reason, "secondary_display_unavailable");
+  devices.clear();
+  EXPECT_EQ(display_device::select_stream_display(primary, devices, "").reason, "primary_display_unavailable");
+}
+
+TEST(DisplayStreamMode, OnlyDisplayRestoresLayoutWhenLastClaimIsReleased) {
+  using enum display_device::stream_mode_e;
+  [[maybe_unused]] const display_device_revert_guard_t guard;
+  const auto persistence = display_device::test_make_watched_persistence();
+  auto manager = std::make_unique<redock_settings_manager_t>(persistence);
+  const display_device::EnumeratedDeviceList devices {active_display("main", true, 0), active_display("virtual", false, 1920)};
+  manager->set_devices(devices);
+  manager->set_keep_pending(false);
+  display_device::test_install_settings_manager(std::move(manager), persistence);
+
+  auto display = display_device::select_stream_display(extend, devices, "virtual");
+  auto extension = display_device::prepare_stream_display(extend, display);
+  ASSERT_TRUE(extension);
+  EXPECT_EQ(display_device::enumerate_devices(), devices);
+  EXPECT_FALSE(display_device::prepare_stream_display(secondary, display));
+  extension.reset();
+
+  auto only_display = display_device::prepare_stream_display(secondary, display);
+  ASSERT_TRUE(only_display);
+  ASSERT_FALSE(display_device::enumerate_devices().front().m_info);
+  auto stream = only_display;
+  only_display.reset();
+  EXPECT_TRUE(display_device::stream_display_claimed());
+  stream.reset();
+  EXPECT_FALSE(display_device::stream_display_claimed());
+  EXPECT_EQ(display_device::enumerate_devices(), devices);
+}
 
 TEST(DisplayDeviceRevert, CompletedRevertStopsTheRetryLoop) {
   [[maybe_unused]] const display_device_revert_guard_t guard;

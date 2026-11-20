@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -1479,6 +1480,122 @@ namespace nvhttp {
     }
   }
 
+  namespace {
+    using stream_mode_e = display_device::stream_mode_e;  ///< Types of explicit display requests.
+    constexpr std::array stream_modes {
+      std::pair {"primary"sv, stream_mode_e::primary},
+      std::pair {"secondary"sv, stream_mode_e::secondary},
+      std::pair {"extend"sv, stream_mode_e::extend}
+    };  ///< Stable mode identifiers exposed to clients.
+
+    /** @brief Validated mode and capture target, or a legacy request with no explicit mode. */
+    struct stream_request_t {
+      std::optional<stream_mode_e> mode;  ///< Explicit mode, if requested.
+      display_device::stream_display_t display;  ///< Selected target for an explicit mode.
+    };
+
+    /** @brief Resolve a display mode available on this host.
+     * @param mode Requested mode.
+     * @param devices Display layout snapshot.
+     * @return Target identity or a stable rejection reason.
+     */
+    display_device::stream_display_t mode_display([[maybe_unused]] stream_mode_e mode, [[maybe_unused]] const display_device::EnumeratedDeviceList &devices) {
+#ifdef _WIN32
+      return display_device::select_stream_display(mode, devices, config::video.output_name);
+#else
+      return {{}, {}, "unsupported_platform"};
+#endif
+    }
+
+    /** @brief Populate the GameStream error response for an explicit display request.
+     * @param tree Response document.
+     * @param status GameStream status code.
+     * @param reason Stable failure identifier for SideLantern clients.
+     */
+    void reject_stream_mode(pt::ptree &tree, int status, std::string_view reason) {
+      tree.put("root.<xmlattr>.status_code", status);
+      tree.put("root.<xmlattr>.status_message", "The requested SideLantern display mode is unavailable");
+      tree.put("root.sidelantern_reason", std::string {reason});
+      tree.put("root.gamesession", 0);
+      tree.put("root.resume", 0);
+    }
+
+    /** @brief Check mode and capture availability before changing any stream or display state.
+     * @param args GameStream parameters.
+     * @param tree Response document used when rejecting a request.
+     * @return Validated request, or no value when it has been rejected.
+     */
+    std::optional<stream_request_t> validate_stream_request(const args_t &args, pt::ptree &tree) {
+      const auto [first, last] = args.equal_range("sidelantern_mode");
+      if (first == last) {
+        if (display_device::stream_display_claimed()) {
+          reject_stream_mode(tree, 409, "capture_busy");
+          return std::nullopt;
+        }
+        return stream_request_t {};
+      }
+      const auto requested = std::ranges::find(stream_modes, first->second, [](const auto &item) { return item.first; });
+      if (requested == stream_modes.end() || std::next(first) != last) {
+        reject_stream_mode(tree, 400, "unknown_mode");
+        return std::nullopt;
+      }
+      if (display_device::stream_display_claimed() || rtsp_stream::capture_busy()) {
+        reject_stream_mode(tree, 409, "capture_busy");
+        return std::nullopt;
+      }
+      auto display = mode_display(requested->second, display_device::enumerate_devices());
+      if (!display.reason.empty()) {
+        reject_stream_mode(tree, display.reason == "unsupported_platform" ? 501 : 503, display.reason);
+        return std::nullopt;
+      }
+      return stream_request_t {requested->second, std::move(display)};
+    }
+
+    /** @brief Prepare the selected source and attach its lifetime to the RTSP ticket.
+     * @param request Validated mode request.
+     * @param ticket Protocol state that will be passed to the streaming session.
+     * @param tree Response document used when preparation or encoder initialization fails.
+     * @return Whether the request can proceed.
+     */
+    bool prepare_stream_request(const stream_request_t &request, rtsp_stream::launch_session_t &ticket, pt::ptree &tree) {
+      if (!request.mode) {
+        return true;
+      }
+      ticket.display_claim = display_device::prepare_stream_display(*request.mode, request.display);
+      const auto capture_output = ticket.display_claim ? display_device::map_output_name(request.display.device_id) : std::string {};
+      if (capture_output.empty() || video::probe_encoders(capture_output)) {
+        reject_stream_mode(tree, 503, "display_preparation_failed");
+        return false;
+      }
+      ticket.required_display_id = request.display.device_id;
+      return true;
+    }
+
+    /** @brief Return the three display choices and their current availability to a paired client.
+     * @param response HTTPS response.
+     */
+    void stream_mode_list(const resp_https_t &response) {
+      const auto devices = display_device::enumerate_devices();
+      const auto busy = display_device::stream_display_claimed() || rtsp_stream::capture_busy();
+      pt::ptree tree;
+      auto &root = tree.add_child("root", pt::ptree {});
+      root.put("<xmlattr>.status_code", 200);
+      root.put("<xmlattr>.version", 1);
+      for (const auto &[id, mode] : stream_modes) {
+        const auto target = mode_display(mode, devices);
+        const auto reason = busy ? "capture_busy"sv : target.reason;
+        auto &item = root.add_child("mode", pt::ptree {});
+        item.put("<xmlattr>.id", std::string {id});
+        item.put("<xmlattr>.available", reason.empty() ? 1 : 0);
+        item.put("<xmlattr>.reason", std::string {reason});
+      }
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+    }
+  }  // namespace
+
   /**
    * @brief Launch the requested application for a GameStream session.
    *
@@ -1509,6 +1626,10 @@ namespace nvhttp {
     });
 
     auto args = request->parse_query_string();
+    const auto stream_request = validate_stream_request(args, tree);
+    if (!stream_request) {
+      return;
+    }
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args) ||
@@ -1536,7 +1657,7 @@ namespace nvhttp {
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args, client);
 
-    if (rtsp_stream::session_count() == 0) {
+    if (!stream_request->mode && rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
       revert_display_configuration = true;
 
@@ -1569,6 +1690,9 @@ namespace nvhttp {
       return;
     }
 
+    if (!prepare_stream_request(*stream_request, *launch_session, tree)) {
+      return;
+    }
     if (appid > 0) {
       auto err = proc::proc.execute((int) appid, launch_session);
       if (err) {
@@ -1622,6 +1746,11 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    auto args = request->parse_query_string();
+    const auto stream_request = validate_stream_request(args, tree);
+    if (!stream_request) {
+      return;
+    }
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
       tree.put("root.resume", 0);
@@ -1631,7 +1760,6 @@ namespace nvhttp {
       return;
     }
 
-    auto args = request->parse_query_string();
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args)
@@ -1652,7 +1780,7 @@ namespace nvhttp {
     }
     const auto launch_session = make_launch_session(host_audio, args, client);
 
-    if (no_active_sessions) {
+    if (no_active_sessions && !stream_request->mode) {
       // We want to prepare display only if there are no active sessions at
       // the moment. This should be done before probing encoders as it could
       // change the active displays.
@@ -1682,6 +1810,10 @@ namespace nvhttp {
       return;
     }
 
+    if (!prepare_stream_request(*stream_request, *launch_session, tree)) {
+      return;
+    }
+
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
       "root.sessionUrl0",
@@ -1696,6 +1828,29 @@ namespace nvhttp {
 
     rtsp_stream::launch_session_raise(launch_session);
   }
+
+  namespace {
+    /** @brief Register the shared authenticated routes for production and HTTPS tests.
+     * @param server GameStream HTTPS listener.
+     */
+    void register_stream_routes(https_server_t &server) {
+      auto host_audio = std::make_shared<bool>(false);
+      const auto authenticated_stream_handler = [&server, &host_audio](auto handler) {
+        return [&server, host_audio, handler](resp_https_t resp, req_https_t req) {
+          if (const auto client = authenticated_request_client(server, *req)) {
+            handler(*host_audio, std::move(resp), std::move(req), *client);
+          } else {
+            server.on_verify_failed(std::move(resp), std::move(req));
+          }
+        };
+      };
+      server.resource["^/launch$"]["GET"] = authenticated_stream_handler(launch);
+      server.resource["^/resume$"]["GET"] = authenticated_stream_handler(resume);
+      server.resource["^/sidelantern/v1/stream-modes$"]["GET"] = authenticated_stream_handler(
+        [](bool &, const resp_https_t &response, const req_https_t &, const named_cert_t &) { stream_mode_list(response); }
+      );
+    }
+  }  // namespace
 
   /**
    * @brief Check whether cel.
@@ -1771,8 +1926,6 @@ namespace nvhttp {
     setup(pkey, cert);
 
     // resume doesn't always get the parameter "localAudioPlayMode"
-    // launch will store it in host_audio
-    bool host_audio {};
 
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
     http_server_t http_server;
@@ -1802,17 +1955,7 @@ namespace nvhttp {
     };
     https_server.resource["^/applist$"]["GET"] = applist;
     https_server.resource["^/appasset$"]["GET"] = appasset;
-    const auto authenticated_stream_handler = [&host_audio, &https_server](auto handler) {
-      return [&host_audio, &https_server, handler](auto resp, auto req) {
-        if (const auto client = authenticated_request_client(https_server, *req)) {
-          handler(host_audio, std::move(resp), std::move(req), *client);
-        } else {
-          https_server.on_verify_failed(std::move(resp), std::move(req));
-        }
-      };
-    };
-    https_server.resource["^/launch$"]["GET"] = authenticated_stream_handler(launch);
-    https_server.resource["^/resume$"]["GET"] = authenticated_stream_handler(resume);
+    register_stream_routes(https_server);
     https_server.resource["^/cancel$"]["GET"] = cancel;
 
     https_server.config.reuse_address = true;
@@ -1932,6 +2075,7 @@ namespace nvhttp {
         server->on_verify_failed = [](const auto &response, const auto &) {
           response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         };
+        register_stream_routes(*server);
         server->resource["^/test-verified-client$"]["GET"] = [server = server.get()](const auto &response, const auto &request) {
           if (const auto client = authenticated_request_client(*server, *request)) {
             response->write(client->uuid);

@@ -70,6 +70,7 @@ namespace video {
     int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
+    std::string required_display_id {};  ///< An explicit capture target that must never fall back to another display.
   };
 
   /**
@@ -831,9 +832,10 @@ namespace video {
    *
    * @param encoder Encoder configuration or encoder instance.
    * @param expect_failure Expect failure.
+   * @param capture_output Explicit platform capture name, or empty to use the default.
    * @return True when encoder validation matches `expect_failure`.
    */
-  bool validate_encoder(encoder_t &encoder, bool expect_failure);
+  bool validate_encoder(encoder_t &encoder, bool expect_failure, const std::string &capture_output = {});
 
   /**
    * @brief Probe encoders and select the preferred encoder.
@@ -842,9 +844,10 @@ namespace video {
    * at runtime due to all sorts of things from driver updates to eGPUs.
    *
    * @warning This is only safe to call when there is no client actively streaming.
+   * @param capture_output Explicit platform capture name, or empty to use the default.
    * @return 0 when a usable encoder is selected; nonzero when probing fails.
    */
-  int probe_encoders();
+  int probe_encoders(const std::string &capture_output = {});
 
   // Several NTSC standard refresh rates are hardcoded here, because their
   // true rate requires a denominator of 1001. ffmpeg's av_d2q() would assume it could

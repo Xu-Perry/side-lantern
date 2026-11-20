@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <mutex>
@@ -1028,6 +1029,88 @@ namespace display_device {
     return DD_DATA.sm_instance->execute([](auto &settings_iface) {
       return settings_iface.enumAvailableDevices();
     });
+  }
+
+  stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output) {
+    const auto active = [](const auto &device) { return device.m_info && !device.m_device_id.empty() && !device.m_display_name.empty(); };
+    const auto primary = std::ranges::find_if(devices, [&](const auto &device) { return active(device) && device.m_info->m_primary; });
+    if (mode == stream_mode_e::primary) {
+      if (primary == devices.end()) {
+        return {.reason = "primary_display_unavailable"};
+      }
+      return {primary->m_device_id, primary->m_display_name, {}};
+    }
+
+    const auto target = std::ranges::find_if(devices, [&](const auto &device) {
+      return active(device) && !device.m_info->m_primary && device.m_device_id == configured_output;
+    });
+    if (primary == devices.end() || target == devices.end() || std::ranges::any_of(devices, [&](const auto &device) {
+          return &device != &*target && device.m_info && device.m_info->m_origin_point == target->m_info->m_origin_point;
+        })) {
+      return {.reason = "secondary_display_unavailable"};
+    }
+    if (mode == stream_mode_e::secondary && std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) != 2) {
+      return {.reason = "other_displays_active"};
+    }
+    return {target->m_device_id, target->m_display_name, {}};
+  }
+
+  namespace {
+    std::atomic_bool explicit_capture_claimed {false};  ///< Exclusive capture claim retained until the ticket and stream release it.
+
+    /** @brief Release the capture claim and restore the layout if this request had changed it. */
+    class stream_display_claim_t final: public platf::deinit_t {
+    public:
+      bool restore_layout {false};  ///< Whether applying the temporary layout was attempted.
+
+      /** @brief Restore the display configuration before allowing another launch. */
+      ~stream_display_claim_t() override {
+        if (restore_layout) {
+          std::lock_guard lock {DD_DATA.mutex};
+          revert_configuration_unlocked(revert_option_e::try_indefinitely);
+        }
+        explicit_capture_claimed = false;
+      }
+    };
+  }  // namespace
+
+  bool stream_display_claimed() {
+    return explicit_capture_claimed.load();
+  }
+
+  std::shared_ptr<platf::deinit_t> prepare_stream_display(stream_mode_e mode, const stream_display_t &target) {
+    if (target.device_id.empty() || explicit_capture_claimed.exchange(true)) {
+      return {};
+    }
+    auto claim = std::make_shared<stream_display_claim_t>();
+    if (mode != stream_mode_e::secondary) {
+      return claim;
+    }
+
+    std::lock_guard lock {DD_DATA.mutex};
+    if (!DD_DATA.sm_instance) {
+      return {};
+    }
+    const auto applied = DD_DATA.sm_instance->execute([&](auto &settings_iface, auto &stop_token) {
+      if (!select_stream_display(mode, settings_iface.enumAvailableDevices(), target.device_id).reason.empty()) {
+        return false;
+      }
+      stop_token.requestStop();
+      claim->restore_layout = true;
+      SingleDisplayConfiguration config;
+      config.m_device_id = target.device_id;
+      config.m_device_prep = SingleDisplayConfiguration::DevicePreparation::EnsureOnlyDisplay;
+      if (settings_iface.applySettings(config) != SettingsManagerInterface::ApplyResult::Ok) {
+        return false;
+      }
+      const auto devices = settings_iface.enumAvailableDevices();
+      return std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) == 1 &&
+             std::ranges::any_of(devices, [&](const auto &device) { return device.m_info && device.m_device_id == target.device_id; });
+    });
+    if (!applied) {
+      return {};
+    }
+    return claim;
   }
 
   std::variant<failed_to_parse_tag_t, configuration_disabled_tag_t, SingleDisplayConfiguration> parse_configuration(const config::video_t &video_config, const rtsp_stream::launch_session_t &session) {

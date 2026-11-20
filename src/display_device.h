@@ -8,7 +8,9 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 // lib includes
 #include <display_device/display_power_interface.h>
@@ -149,6 +151,40 @@ namespace display_device {
    * @examples_end
    */
   [[nodiscard]] EnumeratedDeviceList enumerate_devices();
+
+  /** @brief Display modes available to paired SideLantern clients. */
+  enum class stream_mode_e {
+    primary,  ///< Capture the current primary display.
+    secondary,  ///< Capture the configured extended display with the primary display disabled.
+    extend,  ///< Capture the configured extended display without modifying the layout.
+  };
+
+  /** @brief An explicit capture target selected for a SideLantern request. */
+  struct stream_display_t {
+    std::string device_id;  ///< Stable display ID valid for the lifetime of the request.
+    std::string display_name;  ///< Current platform capture name used for encoder probing.
+    std::string_view reason;  ///< Empty for a valid target, otherwise the protocol failure reason.
+  };
+
+  /** @brief Select a capture target from a snapshot of the active layout.
+   * @param mode Requested display mode.
+   * @param devices Enumerated display topology.
+   * @param configured_output Host-selected extended display ID.
+   * @return Valid display identity or the reason it could not be selected.
+   */
+  [[nodiscard]] stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output);
+
+  /** @brief Claim the capture source and temporarily disable the primary display when requested.
+   * @param mode Requested display mode.
+   * @param target Selected display identity.
+   * @return Lifetime guard, or null when the layout could not be prepared.
+   */
+  [[nodiscard]] std::shared_ptr<platf::deinit_t> prepare_stream_display(stream_mode_e mode, const stream_display_t &target);
+
+  /** @brief Report whether an explicit display request still holds the capture claim.
+   * @return True while its launch ticket or stream is alive.
+   */
+  [[nodiscard]] bool stream_display_claimed();
 
   /**
    * @brief A tag structure indicating that configuration parsing has failed.

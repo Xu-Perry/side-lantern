@@ -21,6 +21,7 @@
 // local includes
 #include <src/config.h>
 #include <src/nvhttp.h>
+#include <src/rtsp.h>
 
 namespace fs = std::filesystem;
 
@@ -149,6 +150,35 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   ASSERT_TRUE(nvhttp::unpair_client(first_id));
   EXPECT_EQ(first.request("GET", "/test-verified-client")->status_code, "401 Unauthorized");
   EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
+
+  // GameStream XML endpoints close the TLS connection after each response.
+  const auto request_mode = [&](const std::string &path, const std::string &peer = "second") {
+    SimpleWeb::Client<SimpleWeb::HTTPS> client {address, false, (directory / (peer + ".cert")).string(), (directory / (peer + ".key")).string()};
+    client.config.timeout = client.config.timeout_connect = 2;
+    const auto response = client.request("GET", path);
+    return std::pair {response->status_code, response->content.string()};
+  };
+  const auto modes = request_mode("/sidelantern/v1/stream-modes").second;
+  EXPECT_NE(modes.find("version=\"1\""), std::string::npos);
+  for (const auto *id : {"primary", "secondary", "extend"}) {
+    EXPECT_NE(modes.find(std::string {"id=\""} + id + '"'), std::string::npos);
+  }
+  for (const auto *path : {"/launch?sidelantern_mode=invalid", "/resume?sidelantern_mode=invalid"}) {
+    const auto rejected = request_mode(path).second;
+    EXPECT_NE(rejected.find("status_code=\"400\""), std::string::npos);
+    EXPECT_NE(rejected.find("unknown_mode"), std::string::npos);
+  }
+  {
+    auto active = rtsp_stream::test_support::insert_session(first_id, "Main display client", true);
+    auto clear = util::fail_guard([&] { rtsp_stream::test_support::remove_session(active); });
+    const auto busy = request_mode("/launch?sidelantern_mode=extend").second;
+    EXPECT_NE(busy.find("status_code=\"409\""), std::string::npos);
+    EXPECT_NE(busy.find("capture_busy"), std::string::npos);
+    const auto sessions = rtsp_stream::active_sessions();
+    ASSERT_EQ(sessions.size(), 1);
+    EXPECT_EQ(sessions.front().device_id, first_id);
+  }
+  EXPECT_EQ(request_mode("/sidelantern/v1/stream-modes", "first").first, "401 Unauthorized");
 }
 
 TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {

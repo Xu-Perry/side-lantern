@@ -1573,8 +1573,21 @@ namespace video {
    * @param dev_type The encoder device type used for display lookup.
    * @param display_names The list of display names to repopulate.
    * @param current_display_index The current display index or -1 if not yet known.
+   * @param required_display_id Stable target ID when switching to any other output is forbidden.
+   * @return Whether a capture output could be selected.
    */
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
+  bool refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, const std::string &required_display_id) {
+    if (!required_display_id.empty()) {
+      const auto requested = display_device::map_output_name(required_display_id);
+      const auto available = platf::display_names(dev_type);
+      if (requested.empty() || std::ranges::find(available, requested) == available.end()) {
+        BOOST_LOG(warning) << "Required streaming display is unavailable"sv;
+        return false;
+      }
+      display_names = {requested};
+      current_display_index = 0;
+      return true;
+    }
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::string current_display_name;
@@ -1592,7 +1605,7 @@ namespace video {
     if (display_names.empty() && !old_display_names.empty()) {
       BOOST_LOG(error) << "No displays were found after reenumeration!"sv;
       display_names = std::move(old_display_names);
-      return;
+      return true;
     } else if (display_names.empty()) {
       display_names.emplace_back(output_name);
     }
@@ -1605,7 +1618,7 @@ namespace video {
       for (int x = 0; x < display_names.size(); ++x) {
         if (display_names[x] == current_display_name) {
           current_display_index = x;
-          return;
+          return true;
         }
       }
 
@@ -1615,10 +1628,11 @@ namespace video {
       for (int x = 0; x < display_names.size(); ++x) {
         if (display_names[x] == output_name) {
           current_display_index = x;
-          return;
+          return true;
         }
       }
     }
+    return true;
   }
 
   /**
@@ -1663,7 +1677,10 @@ namespace video {
     // get the most up-to-date list available monitors
     std::vector<std::string> display_names;
     int display_p = -1;
-    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+    const auto required_display_id = capture_ctxs.front().config.required_display_id;
+    if (!refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, required_display_id)) {
+      return;
+    }
     auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
     if (!disp) {
       return;
@@ -1854,7 +1871,9 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+              if (capture_ctxs.empty() || !refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, required_display_id)) {
+                return;
+              }
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -2847,7 +2866,9 @@ namespace video {
 
     while (encode_session_ctx_queue.running()) {
       // Refresh display names since a display removal might have caused the reinitialization
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      if (!refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, synced_session_ctxs.front()->config.required_display_id)) {
+        return encode_e::capture_error;
+      }
 
       // Process any pending display switch with the new list of displays
       if (switch_display_event->peek()) {
@@ -3207,9 +3228,13 @@ namespace video {
 
   /**
    * @brief Validate encoder before it is used.
+   * @param encoder Encoder to validate.
+   * @param expect_failure Whether encoder failure is expected.
+   * @param capture_output Explicit platform capture name, or empty for the host default.
+   * @return Whether encoding can be initialized.
    */
-  bool validate_encoder(encoder_t &encoder, bool expect_failure) {
-    const auto output_name {display_device::map_output_name(config::video.output_name)};
+  bool validate_encoder(encoder_t &encoder, bool expect_failure, const std::string &capture_output) {
+    const auto output_name = capture_output.empty() ? display_device::map_output_name(config::video.output_name) : capture_output;
     std::shared_ptr<platf::display_t> disp;
 
     BOOST_LOG(info) << "Trying encoder ["sv << encoder.name << ']';
@@ -3435,7 +3460,8 @@ namespace video {
                                                                      encoder.av1[encoder_t::DYNAMIC_RANGE_YUV444];
   }
 
-  int probe_encoders() {
+  int probe_encoders(const std::string &capture_output) {
+    static std::string last_probe_output;  ///< Capture name associated with the last successful probe.
     if (!allow_encoder_probing(display_device::enumerate_devices())) {
       // Error already logged
       return -1;
@@ -3444,7 +3470,7 @@ namespace video {
     auto encoder_list = encoders;
 
     // If we already have a good encoder, check to see if another probe is required
-    if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
+    if (capture_output.empty() && last_probe_output.empty() && chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
       return 0;
     }
 
@@ -3496,7 +3522,7 @@ namespace video {
 
         if (encoder->name == config::video.encoder) {
           // Remove the encoder from the list entirely if it fails validation
-          if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+          if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_output)) {
             pos = encoder_list.erase(pos);
             break;
           }
@@ -3525,7 +3551,7 @@ namespace video {
         auto encoder = *pos;
 
         // Remove the encoder from the list entirely if it fails validation
-        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_output)) {
           pos = encoder_list.erase(pos);
           continue;
         }
@@ -3572,7 +3598,7 @@ namespace video {
         // If we've used a previous encoder and it's not this one, we expect this encoder to
         // fail to validate. It will use a slightly different order of checks to more quickly
         // eliminate failing encoders.
-        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder)) {
+        if (!validate_encoder(*encoder, previous_encoder && previous_encoder != encoder, capture_output)) {
           pos = encoder_list.erase(pos);
           continue;
         }
@@ -3602,6 +3628,8 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+
+    last_probe_output = capture_output;
 
     record_encoder_probe_results(encoder);
 

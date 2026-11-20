@@ -499,6 +499,7 @@ namespace stream {
    */
   struct session_t {
     config_t config;  ///< Stream or encoder configuration captured for the worker.
+    std::shared_ptr<platf::deinit_t> display_claim;  ///< Retains the requested layout through stream teardown.
 
     safe::mail_t mail;  ///< Mailbox used to distribute packets and lifecycle events.
 
@@ -2341,7 +2342,7 @@ namespace stream {
           input::terminate_gamepads();
         }
 
-        if (revert_display_config) {
+        if (revert_display_config && !session.display_claim) {
           display_device::revert_configuration();
         }
 
@@ -2411,6 +2412,7 @@ namespace stream {
       session->input_session_id = launch_session.client_cert.empty() ? launch_session.unique_id : launch_session.client_cert;
 
       session->config = config;
+      session->display_claim = launch_session.display_claim;
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);

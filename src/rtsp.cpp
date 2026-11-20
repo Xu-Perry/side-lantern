@@ -665,6 +665,10 @@ namespace rtsp_stream {
       if (!nvhttp::is_authorized_stream_client(ticket.client_uuid, ticket.client_cert)) {
         return 403;
       }
+      const auto pending = launch_event.view(0s);
+      if (!pending || pending->id != ticket.id || (ticket.display_claim && !_session_slots->empty())) {
+        return 409;
+      }
       const auto slot = _session_slots->emplace(session).first;
       if (stream::session::start(*session, peer_address)) {
         _session_slots->erase(slot);
@@ -746,6 +750,10 @@ namespace rtsp_stream {
     server.clear(false);
 
     return server.session_count();
+  }
+
+  bool capture_busy() {
+    return server.launch_event.view(0s) || server.session_count() != 0;
   }
 
   std::vector<active_session_t> active_sessions() {
@@ -1313,10 +1321,15 @@ namespace rtsp_stream {
       return;
     }
 
+    config.monitor.required_display_id = session.required_display_id;
     auto stream_session = stream::session::alloc(config, session);
     const auto status = rtsp_server->start_session(stream_session, session, sock.remote_endpoint().address().to_string());
     if (status == 403) {
       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+      return;
+    }
+    if (status == 409) {
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
       return;
     }
     if (status != 200) {

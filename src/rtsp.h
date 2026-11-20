@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,10 @@
 
 namespace stream {
   struct session_t;
+}
+
+namespace platf {
+  class deinit_t;
 }
 
 namespace rtsp_stream {
@@ -101,6 +106,8 @@ namespace rtsp_stream {
     bool enable_sops;  ///< Whether sequence output protection is requested.
     std::string client_name;  ///< Friendly client name from initial pairing.
     std::string client_uuid;  ///< Persistent paired device ID authenticated by the HTTPS connection.
+    std::string required_display_id;  ///< Selected display ID carried through RTSP negotiation.
+    std::shared_ptr<platf::deinit_t> display_claim;  ///< Capture claim and optional temporary layout guard.
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;  ///< AES-GCM cipher used once encrypted RTSP is negotiated.
     std::string rtsp_url_scheme;  ///< URL scheme selected by the RTSP SETUP flow.
@@ -134,6 +141,11 @@ namespace rtsp_stream {
    * @return Count of active sessions.
    */
   int session_count();
+
+  /** @brief Report streams and pending launches without changing the session registry.
+   * @return True while a launch or stream occupies the shared capture pipeline.
+   */
+  bool capture_busy();
 
   /**
    * @brief Snapshot the running streams with a connected control peer.
