@@ -20,6 +20,7 @@
 #include <MinHook.h>
 
 // local includes
+#include "src/manual_video_settings.h"
 #include "utf_utils.h"
 
 // Including Boost.Process before Windows.h prevents the definition of NTSTATUS, so we must define it ourselves.
@@ -263,6 +264,16 @@ namespace platf::dxgi {
     sleep_overshoot_logger.reset();
 
     while (true) {
+      if (manual_video_settings) {
+        const auto fps = manual_video_settings->snapshot().current.fps;
+        if (fps != client_frame_rate) {
+          client_frame_rate = fps;
+          client_frame_rate_strict = {0, 0};
+          client_frame_rate_adjusted = adjust_client_frame_rate();
+          frame_pacing_group_start.reset();
+          frame_pacing_group_frames = 0;
+        }
+      }
       // This will return false if the HDR state changes or for any number of other
       // display or GPU changes. We should reinit to examine the updated state of
       // the display subsystem. It is recommended to call this once per frame.
@@ -737,6 +748,7 @@ namespace platf::dxgi {
     }
 
     client_frame_rate = config.framerate;
+    manual_video_settings = config.manual_settings;
     client_frame_rate_strict = {0, 0};
     if (config.framerateX100 > 0) {
       const AVRational fps = ::video::framerate_to_rational(config);

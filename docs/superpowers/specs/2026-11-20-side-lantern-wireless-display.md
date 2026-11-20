@@ -15,3 +15,21 @@ iPad 用户在选定主机后主动选择「只连主屏」「只连副屏」或
 首版共享一条采集管线，三个模式需要采集空闲，已有串流继续运行。主屏或副屏目标在会话内按稳定 ID 固定，显示器断开时结束会话。临时布局由会话持有，申请失败、协商超时或会话结束时恢复。失败原因包括 `unknown_mode`、`capture_busy`、`primary_display_unavailable`、`secondary_display_unavailable`、`multiple_secondary_displays`、`other_displays_active`、`display_preparation_failed` 和 `unsupported_platform`。
 
 副屏模式优先使用主机明确选定的非主屏目标。没有此类配置时，通过 Windows 显示设备的硬件 ID 识别 MttVDD，自动选取唯一可用的输出。驱动已提供可用输出但输出未启用时，连接时可自动加入 Windows 扩展布局。驱动尚未提供输出时，需先在驱动控制面板启用一个。若出现多个可用虚拟输出，需在主机选定其中一个。处于镜像布局的输出需先改为独立输出。`primary` 始终解析当前主显示器。收到 `capture_busy` 时，客户端应保留当前会话并提示用户稍后再试。
+
+## 串流中的手动画质设置
+
+Windows 主机在模式发现结果中提供 `manual_video_version="1"` 时，能够接收这个协议。客户端须能处理串流中的新编码尺寸和关键帧，并在显式模式的 `/launch` 或 `/resume` 请求中附加 `sidelantern_manual_video=1`。实际可用性取决于会话建立时选中的编码器。
+
+- `GET /sidelantern/v1/manual-video` 用同一配对证书查询已连接的会话，返回 XML 中的 `session_id`、`width`、`height`、`fps`、`bitrate_kbps` 和 `status`。
+- `POST /sidelantern/v1/manual-video` 在查询参数中提交同一个 `session_id` 和四个整数设置。`bitrate_kbps` 是视频编码器的目标码率。若只改一项，从查询结果复制其余设置。主机的分辨率和码率上限同时适用。
+- XML 中的 `status_code="202"` 表示已接收请求。随后轮询查询接口，`pending` 表示正在处理，`applied` 表示已采用返回的设置，`rejected` 表示编码器初始化失败，返回值仍是原设置。主机同一时间处理一项修改。`409` 表示该会话 ID 已过期或已有修改在处理。
+
+更改只作用于当前会话的视频。主机保留连接、音频、编码格式、HDR 协商、采集目标和 Windows 显示布局。编码器可在同一连接中重建并输出新关键帧。客户端按关键帧更新播放尺寸和触控坐标，网络波动不会自行切换参数。
+
+例如，当前会话 ID 为 `42`，编码尺寸为 `1280×720`，帧率为 `60` 时，可以把视频目标码率改到 `5500 Kbps`。
+
+```http
+POST /sidelantern/v1/manual-video?session_id=42&width=1280&height=720&fps=60&bitrate_kbps=5500
+```
+
+客户端以 XML 根节点的 `status_code` 判断请求结果。`404` 表示当前没有该配对设备可调整的会话。收到 `applied` 后，以查询结果更新设置界面。尺寸变更时，在收到新关键帧和格式参数后更新播放比例与触控映射。

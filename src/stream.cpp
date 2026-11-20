@@ -2287,6 +2287,13 @@ namespace stream {
       return session.client_identity;
     }
 
+    std::optional<rtsp_stream::manual_video_session_t> manual_video_session(const session_t &session, std::string_view client_id) {
+      if (session.config.monitor.manual_settings && session.client_identity.device_id == client_id && active_identity(session)) {
+        return rtsp_stream::manual_video_session_t {session.launch_session_id, session.config.monitor.manual_settings};
+      }
+      return std::nullopt;
+    }
+
     /**
      * @brief Stop the active streaming session and prevent new packets from being queued.
      */
@@ -2478,8 +2485,10 @@ namespace stream {
 
 #ifdef SUNSHINE_TESTS
     namespace test_support {
-      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected) {
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings) {
         auto session = std::make_shared<session_t>();
+        session->launch_session_id = 42;
+        session->config.monitor.manual_settings = std::move(settings);
         session->client_identity = std::move(identity);
         session->control.connected.store(connected, std::memory_order_relaxed);
         session->state.store(state_e::RUNNING, std::memory_order_relaxed);

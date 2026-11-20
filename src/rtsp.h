@@ -10,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // local includes
@@ -19,6 +21,10 @@
 
 namespace stream {
   struct session_t;
+}
+
+namespace video {
+  class manual_video_settings_t;
 }
 
 namespace platf {
@@ -107,6 +113,7 @@ namespace rtsp_stream {
     std::string client_name;  ///< Friendly client name from initial pairing.
     std::string client_uuid;  ///< Persistent paired device ID authenticated by the HTTPS connection.
     std::string required_display_id;  ///< Selected display ID carried through RTSP negotiation.
+    bool manual_video {};  ///< Client has opted in to in-session video format changes.
     std::shared_ptr<platf::deinit_t> display_claim;  ///< Capture claim and optional temporary layout guard.
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;  ///< AES-GCM cipher used once encrypted RTSP is negotiated.
@@ -122,6 +129,15 @@ namespace rtsp_stream {
     std::string device_id;  ///< Persistent paired device UUID.
     std::string name;  ///< Friendly device name supplied during pairing.
   };
+
+  /** @brief Settings handle for a connected, opted-in SideLantern stream. */
+  struct manual_video_session_t {
+    uint32_t id;  ///< Launch identifier used to reject stale requests.
+    std::shared_ptr<video::manual_video_settings_t> settings;  ///< State owned by this stream.
+  };
+
+  /** @brief Find the manual settings for the authenticated client. @param client_id Paired UUID. @return Connected session if supported. */
+  std::optional<manual_video_session_t> manual_video_session(std::string_view client_id);
 
   /**
    * @brief Queue a launch session until the RTSP client connects.
@@ -178,7 +194,7 @@ namespace rtsp_stream {
      * @param connected Whether the session has established its control channel.
      * @return Session handle to remove from the registry after the test.
      */
-    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected);
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings = {});
 
     /**
      * @brief Remove a threadless session after testing the session registry.

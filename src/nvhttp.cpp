@@ -8,6 +8,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -33,6 +34,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "manual_video_settings.h"
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
@@ -605,6 +607,7 @@ namespace nvhttp {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
+    launch_session->manual_video = args.count("sidelantern_manual_video") == 1 && get_arg(args, "sidelantern_manual_video", "0") == "1";
 
     auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
     std::copy(rikey.cbegin(), rikey.cend(), std::back_inserter(launch_session->gcm_key));
@@ -1584,6 +1587,9 @@ namespace nvhttp {
       auto &root = tree.add_child("root", pt::ptree {});
       root.put("<xmlattr>.status_code", 200);
       root.put("<xmlattr>.version", 1);
+#ifdef _WIN32
+      root.put("<xmlattr>.manual_video_version", 1);
+#endif
       for (const auto &[id, mode] : stream_modes) {
         const auto target = mode_display(mode, devices, virtual_targets);
         const auto reason = busy ? "capture_busy"sv : target.reason;
@@ -1596,6 +1602,83 @@ namespace nvhttp {
       pt::write_xml(data, tree);
       response->write(data.str());
       response->close_connection_after_response = true;
+    }
+
+    /** @brief Read a single unsigned query value without accepting trailing text or duplicates.
+     * @param args HTTP query parameters.
+     * @param key Parameter name.
+     * @return Parsed value when the field occurs exactly once.
+     */
+    std::optional<uint32_t> manual_video_query_value(const args_t &args, const char *key) {
+      const auto [first, end] = args.equal_range(key);
+      if (first == end || std::next(first) != end) {
+        return std::nullopt;
+      }
+      const auto &value = first->second;
+      uint32_t result;
+      const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+      return parsed.ec == std::errc {} && parsed.ptr == value.data() + value.size() ? std::optional {result} : std::nullopt;
+    }
+
+    /** @brief Query or queue manual settings for the connected stream of the authenticated device.
+     * @param response HTTPS response.
+     * @param request HTTPS request and optional settings query.
+     * @param client Paired device authenticated by TLS.
+     * @param update True for an explicit client update.
+     */
+    void manual_video(const resp_https_t &response, const req_https_t &request, const named_cert_t &client, bool update) {
+      pt::ptree tree;
+      auto &root = tree.add_child("root", pt::ptree {});
+      auto write = util::fail_guard([&] {
+        std::ostringstream data;
+        pt::write_xml(data, tree);
+        response->write(data.str());
+        response->close_connection_after_response = true;
+      });
+      root.put("<xmlattr>.version", 1);
+      const auto session = rtsp_stream::manual_video_session(client.uuid);
+      if (!session) {
+        root.put("<xmlattr>.status_code", 404);
+        root.put("status", "no_manual_video_session");
+        return;
+      }
+      int status = 200;
+      if (update) {
+        const auto args = request->parse_query_string();
+        const auto id = manual_video_query_value(args, "session_id");
+        const auto width = manual_video_query_value(args, "width");
+        const auto height = manual_video_query_value(args, "height");
+        const auto fps = manual_video_query_value(args, "fps");
+        const auto bitrate = manual_video_query_value(args, "bitrate_kbps");
+        if (!id || !width || !height || !fps || !bitrate || args.size() != 5 ||
+            *width < 64 || *width > 7680 || *height < 64 || *height > 7680 || *width % 2 != 0 || *height % 2 != 0 ||
+            *width * *height > 7680 * 4320 || *fps < 1 || *fps > 240 || *bitrate < 500 || *bitrate > 250000) {
+          status = 400;
+          root.put("reason", "invalid_video_settings");
+        } else if (*id != session->id) {
+          status = 409;
+          root.put("reason", "stale_session");
+        } else {
+          video::video_settings_t settings {static_cast<int>(*width), static_cast<int>(*height), static_cast<int>(*fps), static_cast<int>(*bitrate)};
+          if ((config::video.max_bitrate > 0 && settings.bitrate_kbps > config::video.max_bitrate) || config::cap_stream_resolution(settings.width, settings.height)) {
+            status = 400;
+            root.put("reason", "host_video_limit");
+          } else if (!session->settings->request(settings)) {
+            status = 409;
+            root.put("reason", "video_change_pending");
+          } else {
+            status = 202;
+          }
+        }
+      }
+      const auto snapshot = session->settings->snapshot();
+      root.put("<xmlattr>.status_code", status);
+      root.put("session_id", session->id);
+      root.put("status", std::string {snapshot.status});
+      root.put("width", snapshot.current.width);
+      root.put("height", snapshot.current.height);
+      root.put("fps", snapshot.current.fps);
+      root.put("bitrate_kbps", snapshot.current.bitrate_kbps);
     }
   }  // namespace
 
@@ -1851,6 +1934,12 @@ namespace nvhttp {
       server.resource["^/resume$"]["GET"] = authenticated_stream_handler(resume);
       server.resource["^/sidelantern/v1/stream-modes$"]["GET"] = authenticated_stream_handler(
         [](bool &, const resp_https_t &response, const req_https_t &, const named_cert_t &) { stream_mode_list(response); }
+      );
+      server.resource["^/sidelantern/v1/manual-video$"]["GET"] = authenticated_stream_handler(
+        [](bool &, const resp_https_t &response, const req_https_t &request, const named_cert_t &client) { manual_video(response, request, client, false); }
+      );
+      server.resource["^/sidelantern/v1/manual-video$"]["POST"] = authenticated_stream_handler(
+        [](bool &, const resp_https_t &response, const req_https_t &request, const named_cert_t &client) { manual_video(response, request, client, true); }
       );
     }
   }  // namespace

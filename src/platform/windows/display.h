@@ -364,6 +364,7 @@ namespace platf::dxgi {
 
     int client_frame_rate;  ///< Client frame rate.
     DXGI_RATIONAL client_frame_rate_strict;  ///< Client frame rate strict.
+    std::shared_ptr<::video::manual_video_settings_t> manual_video_settings;  ///< Applied live pacing settings, if negotiated.
 
     DXGI_FORMAT capture_format;  ///< Capture format.
     D3D_FEATURE_LEVEL feature_level;  ///< Feature level.

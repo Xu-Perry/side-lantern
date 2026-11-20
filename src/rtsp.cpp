@@ -33,6 +33,7 @@ extern "C" {
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
+#include "manual_video_settings.h"
 #include "video.h"
 
 namespace asio = boost::asio;
@@ -608,6 +609,17 @@ namespace rtsp_stream {
       return sessions;
     }
 
+    /** @brief Resolve a connected manual-video session. @param client_id Paired UUID. @return The matching session, if one exists. */
+    std::optional<manual_video_session_t> manual_video_session(std::string_view client_id) {
+      auto lock = _session_slots.lock();
+      for (const auto &session : *_session_slots) {
+        if (auto match = stream::session::manual_video_session(*session, client_id)) {
+          return match;
+        }
+      }
+      return std::nullopt;
+    }
+
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;  ///< Launch event.
 
     /**
@@ -762,10 +774,14 @@ namespace rtsp_stream {
     return sessions;
   }
 
+  std::optional<manual_video_session_t> manual_video_session(std::string_view client_id) {
+    return server.manual_video_session(client_id);
+  }
+
 #ifdef SUNSHINE_TESTS
   namespace test_support {
-    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected) {
-      auto session = stream::session::test_support::make_session({std::move(device_id), std::move(name)}, connected);
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings) {
+      auto session = stream::session::test_support::make_session({std::move(device_id), std::move(name)}, connected, std::move(settings));
       server.insert(session);
       return session;
     }
@@ -1322,6 +1338,13 @@ namespace rtsp_stream {
     }
 
     config.monitor.required_display_id = session.required_display_id;
+    if (session.manual_video && session.display_claim && video::supports_manual_video_settings() && config.monitor.framerate > 0) {
+      auto &monitor = config.monitor;
+      if (::config::video.max_bitrate > 0) {
+        monitor.bitrate = std::min(monitor.bitrate, ::config::video.max_bitrate);
+      }
+      monitor.manual_settings = std::make_shared<video::manual_video_settings_t>(video::video_settings_t {monitor.width, monitor.height, monitor.framerate, monitor.bitrate});
+    }
     auto stream_session = stream::session::alloc(config, session);
     const auto status = rtsp_server->start_session(stream_session, session, sock.remote_endpoint().address().to_string());
     if (status == 403) {

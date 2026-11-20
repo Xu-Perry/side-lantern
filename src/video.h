@@ -36,6 +36,8 @@ namespace stream {
 }
 
 namespace video {
+  class manual_video_settings_t;
+
   /**
    * @brief Return the platform output name of the initialized shared capture.
    * @return Output name, or an empty string before capture, during reinit, or when capture stops.
@@ -71,7 +73,11 @@ namespace video {
     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
     std::string required_display_id {};  ///< An explicit capture target that must never fall back to another display.
+    std::shared_ptr<manual_video_settings_t> manual_settings;  ///< Optional client-controlled settings for this session.
   };
+
+  /** @brief Check whether the selected encoder can replace a live video stream. @return True if supported. */
+  bool supports_manual_video_settings();
 
   /**
    * @brief Describe the streamed display, desktop bounds, and client letterboxing for absolute input.

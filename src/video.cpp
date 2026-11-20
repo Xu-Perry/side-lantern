@@ -32,6 +32,7 @@ extern "C" {
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
+#include "manual_video_settings.h"
 #include "nvenc/nvenc_encoder.h"
 #include "platform/common.h"
 #include "sync.h"
@@ -1509,6 +1510,14 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+
+  bool supports_manual_video_settings() {
+#ifdef _WIN32
+    return chosen_encoder && (chosen_encoder->flags & PARALLEL_ENCODING) && !(chosen_encoder->flags & FIXED_GOP_SIZE);
+#else
+    return false;
+#endif
+  }
   int active_hevc_mode;  ///< HEVC mode selected by the most recent encoder probe.
   int active_av1_mode;  ///< AV1 mode selected by the most recent encoder probe.
   bool last_encoder_probe_supported_ref_frames_invalidation = false;  ///< Whether the last probe found reference-frame invalidation support.
@@ -2553,6 +2562,14 @@ namespace video {
     return nullptr;
   }
 
+  /** @brief Create an encoder device for the specified capture display and encoding settings.
+   * @param disp Capture display.
+   * @param encoder Selected encoder implementation.
+   * @param config Video settings.
+   * @return Encoder device, or null if creation failed.
+   */
+  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config);
+
   /**
    * @brief Run one encode loop for a display capture stream.
    *
@@ -2588,40 +2605,70 @@ namespace video {
     // to restart encoding as soon as possible. For cases where the NVENC driver
     // hang occurs, this thread may probably never exit, but it will allow
     // streaming to continue without requiring a full restart of Sunshine.
-    auto fail_guard = util::fail_guard([&encoder, &session] {
-      if (encoder.flags & ASYNC_TEARDOWN) {
-        std::jthread encoder_teardown_thread {[session = std::move(session)]() mutable {
+    const auto release_encoder = [&encoder](std::unique_ptr<encode_session_t> previous) {
+      if (previous && (encoder.flags & ASYNC_TEARDOWN)) {
+        std::jthread encoder_teardown_thread {[session = std::move(previous)]() mutable {
           BOOST_LOG(info) << "Starting async encoder teardown";
           session.reset();
           BOOST_LOG(info) << "Async encoder teardown complete";
         }};
         encoder_teardown_thread.detach();
       }
-    });
+    };
+    auto fail_guard = util::fail_guard([&] { release_encoder(std::move(session)); });
 
-    // set max frame time based on client-requested target framerate.
-    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
-    std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
+    const auto frame_wait = [&](int fps) {
+      const auto minimum = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (fps / 2);
+      return std::chrono::duration<double, std::milli> {1000.0 / (config.manual_settings ? std::clamp(minimum, 1.0, double(fps)) : minimum)};
+    };
+    auto max_frametime = frame_wait(config.framerate);
+    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << 1000.0 / max_frametime.count() << "fps ("sv << max_frametime.count() << "ms)"sv;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 
-    {
-      // Load a dummy image into the AVFrame to ensure we have something to encode
-      // even if we timeout waiting on the first frame. This is a relatively large
-      // allocation which can be freed immediately after convert(), so we do this
-      // in a separate scope.
-      auto dummy_img = disp->alloc_img();
-      if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return;
+    std::shared_ptr<platf::img_t> last_image;
+    const auto prime_encoder = [&](encode_session_t &candidate) {
+      if (last_image) {
+        return !candidate.convert(*last_image);
       }
+      // Prepare a frame for the first deadline, including when the desktop is idle.
+      auto dummy_img = disp->alloc_img();
+      return dummy_img && !disp->dummy_img(dummy_img.get()) && !candidate.convert(*dummy_img);
+    };
+    if (!prime_encoder(*session)) {
+      return;
     }
 
     while (true) {
       bool requested_idr_frame = false;
+
+      if (config.manual_settings && !shutdown_event->peek() && !reinit_event.peek()) {
+        if (const auto desired = config.manual_settings->pending()) {
+          auto updated = config;
+          updated.width = desired->width;
+          updated.height = desired->height;
+          if (updated.framerate != desired->fps) {
+            updated.framerate = desired->fps;
+            updated.framerateX100 = 0;
+          }
+          updated.bitrate = desired->bitrate_kbps;
+          auto device = make_encode_device(*disp, encoder, updated);
+          auto replacement = device ? make_encode_session(disp.get(), encoder, updated, disp->width, disp->height, std::move(device)) : nullptr;
+          const bool applied = replacement && prime_encoder(*replacement);
+          if (applied) {
+            session.swap(replacement);
+            config = std::move(updated);
+            max_frametime = frame_wait(config.framerate);
+            mail->event<input::touch_port_t>(mail::touch_port)->raise(make_port(disp.get(), config));
+            requested_idr_frame = true;
+          }
+          config.manual_settings->finish(applied);
+          release_encoder(std::move(replacement));
+        }
+      }
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
@@ -2647,6 +2694,9 @@ namespace video {
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
+          }
+          if (config.manual_settings) {
+            last_image = std::move(img);
           }
         } else if (!images->running()) {
           break;
@@ -3087,6 +3137,16 @@ namespace video {
 
       auto &encoder = *chosen_encoder;
 
+      if (config.manual_settings) {
+        const auto current = config.manual_settings->snapshot().current;
+        config.width = current.width;
+        config.height = current.height;
+        if (config.framerate != current.fps) {
+          config.framerate = current.fps;
+          config.framerateX100 = 0;
+        }
+        config.bitrate = current.bitrate_kbps;
+      }
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
         return;

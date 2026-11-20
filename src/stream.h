@@ -104,6 +104,9 @@ namespace stream {
      */
     std::optional<rtsp_stream::active_session_t> active_identity(const session_t &session);
 
+    /** @brief Get the active client's manual video settings. @param session Runtime session. @param client_id Paired UUID. @return Settings for the matching active session. */
+    std::optional<rtsp_stream::manual_video_session_t> manual_video_session(const session_t &session, std::string_view client_id);
+
 #ifdef SUNSHINE_TESTS
     namespace test_support {
       /**
@@ -112,7 +115,7 @@ namespace stream {
        * @param connected Whether the control channel has connected.
        * @return Threadless sample session.
        */
-      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected);
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings = {});
     }  // namespace test_support
 #endif
   }  // namespace session

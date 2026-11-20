@@ -20,6 +20,7 @@
 
 // local includes
 #include <src/config.h>
+#include <src/manual_video_settings.h>
 #include <src/nvhttp.h>
 #include <src/rtsp.h>
 
@@ -152,10 +153,10 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
 
   // GameStream XML endpoints close the TLS connection after each response.
-  const auto request_mode = [&](const std::string &path, const std::string &peer = "second") {
+  const auto request_mode = [&](const std::string &path, const std::string &peer = "second", const std::string &method = "GET") {
     SimpleWeb::Client<SimpleWeb::HTTPS> client {address, false, (directory / (peer + ".cert")).string(), (directory / (peer + ".key")).string()};
     client.config.timeout = client.config.timeout_connect = 2;
-    const auto response = client.request("GET", path);
+    const auto response = client.request(method, path);
     return std::pair {response->status_code, response->content.string()};
   };
   const auto modes = request_mode("/sidelantern/v1/stream-modes").second;
@@ -179,6 +180,29 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
     EXPECT_EQ(sessions.front().device_id, first_id);
   }
   EXPECT_EQ(request_mode("/sidelantern/v1/stream-modes", "first").first, "401 Unauthorized");
+  const std::string manual_path = "/sidelantern/v1/manual-video";
+  EXPECT_NE(request_mode(manual_path).second.find("no_manual_video_session"), std::string::npos);
+  const auto settings = std::make_shared<video::manual_video_settings_t>(video::video_settings_t {1920, 1080, 60, 12000});
+  {
+    auto other = rtsp_stream::test_support::insert_session(first_id, "Another client", true, settings);
+    auto clear = util::fail_guard([&] { rtsp_stream::test_support::remove_session(other); });
+    EXPECT_NE(request_mode(manual_path).second.find("no_manual_video_session"), std::string::npos);
+  }
+  {
+    auto active = rtsp_stream::test_support::insert_session(second_id, "Manual client", true, settings);
+    auto clear = util::fail_guard([&] { rtsp_stream::test_support::remove_session(active); });
+    const auto args = "&width=1280&height=720&fps=30&bitrate_kbps=7000";
+    EXPECT_EQ(request_mode(manual_path, "first").first, "401 Unauthorized");
+    EXPECT_NE(request_mode(manual_path + "?session_id=41" + args, "second", "POST").second.find("stale_session"), std::string::npos);
+    EXPECT_NE(request_mode(manual_path + "?session_id=42" + args + "&fps=6", "second", "POST").second.find("invalid_video_settings"), std::string::npos);
+    EXPECT_NE(request_mode(manual_path + "?session_id=42" + args, "second", "POST").second.find("status_code=\"202\""), std::string::npos);
+    EXPECT_NE(request_mode(manual_path).second.find("<status>pending</status>"), std::string::npos);
+    settings->finish(true);
+    const auto applied = request_mode(manual_path).second;
+    EXPECT_NE(applied.find("<width>1280</width>"), std::string::npos);
+    EXPECT_NE(applied.find("<fps>30</fps>"), std::string::npos);
+    EXPECT_NE(applied.find("<bitrate_kbps>7000</bitrate_kbps>"), std::string::npos);
+  }
 }
 
 TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {

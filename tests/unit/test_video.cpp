@@ -26,9 +26,27 @@ extern "C" {
 
 // local includes
 #include <src/config.h>
+#include <src/manual_video_settings.h>
 #include <src/video.h>
 
 using namespace std::literals;
+
+TEST(ManualVideoSettings, KeepsOldSettingsUntilReplacementSucceeds) {
+  const video::video_settings_t original {1920, 1080, 60, 12000};
+  const video::video_settings_t requested {1280, 720, 30, 8500};
+  video::manual_video_settings_t state {original};
+  EXPECT_TRUE(state.request(requested));
+  EXPECT_FALSE(state.request(original));
+  EXPECT_EQ(state.snapshot().current, original);
+  EXPECT_EQ(state.pending(), requested);
+  state.finish(false);
+  EXPECT_EQ(state.snapshot().current, original);
+  EXPECT_EQ(state.snapshot().status, "rejected");
+  EXPECT_TRUE(state.request(requested));
+  state.finish(true);
+  EXPECT_EQ(state.snapshot().current, requested);
+  EXPECT_EQ(state.snapshot().status, "applied");
+}
 
 /**
  * @brief Packet replacement rules retain the original non-owning byte views.
