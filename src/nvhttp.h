@@ -355,6 +355,14 @@ namespace nvhttp {
    * @return true if the client was found and updated.
    */
   bool set_client_enabled(std::string_view uuid, bool enabled);
+
+  /**
+   * @brief Check that an authenticated streaming ticket still belongs to the same enabled device.
+   * @param uuid Paired device ID recorded during the TLS launch or resume request.
+   * @param cert PEM certificate recorded during the TLS launch or resume request.
+   * @return Whether the exact certificate and device ID are still enabled.
+   */
+  bool is_authorized_stream_client(std::string_view uuid, std::string_view cert);
   /**
    * @brief Get cert by UUID.
    *
@@ -398,12 +406,14 @@ namespace nvhttp {
      * @param certificate_file Path to the server certificate PEM file.
      * @param private_key_file Path to the matching private key PEM file.
      * @param handler_scope Receives the scope runner that prevents destruction during callbacks.
+     * @param report_verified_client Whether to use production pairing authorization and expose the current test peer's UUID.
      * @return HTTPS server ready for test endpoint configuration.
      */
     std::unique_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> make_https_server(
       const std::string &certificate_file,
       const std::string &private_key_file,
-      std::shared_ptr<SimpleWeb::ScopeRunner> &handler_scope
+      std::shared_ptr<SimpleWeb::ScopeRunner> &handler_scope,
+      bool report_verified_client = false
     );
 
     /**

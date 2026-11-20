@@ -93,6 +93,20 @@ namespace confighttp {
   void getCSRFToken(const resp_https_t &response, const req_https_t &request);
 
   /**
+   * @brief List paired clients with active streams.
+   * @param response HTTP response object to populate.
+   * @param request HTTP request data from the client.
+   */
+  void getActiveSessions(const resp_https_t &response, const req_https_t &request);
+
+  /**
+   * @brief List the display IDs and platform names available to the host.
+   * @param response HTTP response object to populate.
+   * @param request HTTP request data from the client.
+   */
+  void getDisplays(const resp_https_t &response, const req_https_t &request);
+
+  /**
    * @brief List authenticated pairing requests awaiting operator approval.
    *
    * @param response HTTP response object to populate.

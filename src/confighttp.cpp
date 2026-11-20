@@ -62,6 +62,7 @@
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
+#include "video.h"
 
 using namespace std::literals;
 
@@ -1429,6 +1430,40 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the paired identities of clients with active streams.
+   * @api_examples{/api/sessions|:| GET|:| null}
+   */
+  void getActiveSessions(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    auto sessions = nlohmann::json::array();
+    const auto display_name = video::active_capture_output();
+    const nlohmann::json source = display_name.empty() ? nlohmann::json(nullptr) : nlohmann::json(display_name);
+    for (const auto &session : rtsp_stream::active_sessions()) {
+      sessions.push_back({{"device_id", session.device_id}, {"name", session.name}, {"source", source}});
+    }
+    send_response(response, {{"status", true}, {"sessions", std::move(sessions)}});
+  }
+
+  /**
+   * @brief Get display IDs and platform display names for the local host.
+   * @api_examples{/api/displays|:| GET|:| null}
+   */
+  void getDisplays(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    auto displays = nlohmann::json::array();
+    for (const auto &display : display_device::enumerate_devices()) {
+      displays.push_back({{"device_id", display.m_device_id}, {"display_name", display.m_display_name}});
+    }
+    send_response(response, {{"status", true}, {"displays", std::move(displays)}});
+  }
+
+  /**
    * @brief Enable or disable a client.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -1519,9 +1554,13 @@ namespace confighttp {
       nlohmann::json output_tree;
       const nlohmann::json input_tree = nlohmann::json::parse(ss);
       const std::string uuid = input_tree.value("uuid", "");
+      const auto cert = nvhttp::get_cert_by_uuid(uuid);
       const bool removed = nvhttp::unpair_client(uuid);
       output_tree["status"] = removed;
 
+      if (removed && !cert.empty()) {
+        rtsp_stream::terminate_sessions_by_cert(cert);
+      }
       if (removed && nvhttp::get_all_clients().empty()) {
         proc::proc.terminate();
       }
@@ -2584,6 +2623,8 @@ namespace confighttp {
     server.resource["^/api/apps/([0-9]+)$"]["DELETE"] = deleteApp;
     server.resource["^/api/apps/close$"]["POST"] = closeApp;
     server.resource["^/api/clients/list$"]["GET"] = getClients;
+    server.resource["^/api/sessions$"]["GET"] = getActiveSessions;
+    server.resource["^/api/displays$"]["GET"] = getDisplays;
     server.resource["^/api/clients/unpair$"]["POST"] = unpair;
     server.resource["^/api/clients/unpair-all$"]["POST"] = unpairAll;
     server.resource["^/api/clients/update$"]["POST"] = updateClient;

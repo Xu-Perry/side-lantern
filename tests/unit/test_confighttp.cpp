@@ -34,7 +34,9 @@
 #include <src/network.h>
 #include <src/nvhttp.h>
 #include <src/process.h>
+#include <src/rtsp.h>
 #include <src/utility.h>
+#include <src/video.h>
 
 #ifdef SUNSHINE_BUILD_PORTAL
   #include <src/platform/linux/misc.h>
@@ -345,6 +347,8 @@ protected:
     server->resource["^/pairing-test$"]["POST"] = confighttp::savePin;
     server->resource["^/portal-token-reset-test$"]["POST"] = confighttp::resetPortalToken;
     server->resource["^/api/apps$"]["POST"] = confighttp::saveApp;
+    server->resource["^/api/sessions$"]["GET"] = confighttp::getActiveSessions;
+    server->resource["^/api/displays$"]["GET"] = confighttp::getDisplays;
     server->default_resource["GET"] = confighttp::getFallbackPage;
 
     // Start server
@@ -689,6 +693,63 @@ TEST_F(ConfigHttpTest, PairingRestApiListsAuthenticatedPendingRequests) {
   EXPECT_EQ(body.at("pairings").front().at("id"), pairing_id);
   EXPECT_EQ(body.at("pairings").front().at("name"), "REST client");
   EXPECT_EQ(body.at("pairings").front().at("address"), "192.0.2.30");
+}
+
+TEST_F(ConfigHttpTest, SessionAndDisplayEndpointsRequireAuthentication) {
+  for (const auto *path : {"/api/sessions", "/api/displays"}) {
+    const auto response = client->request("GET", path, "");
+    EXPECT_EQ(response->status_code, "401 Unauthorized");
+  }
+}
+
+TEST_F(ConfigHttpTest, ActiveSessionsExcludePendingAndDisconnectedPeers) {
+  const auto first = rtsp_stream::test_support::insert_session("first", "Tablet", true);
+  const auto second = rtsp_stream::test_support::insert_session("second", "Laptop", true);
+  const auto pending = rtsp_stream::test_support::insert_session("pending", "Handheld", false);
+  auto cleanup = util::fail_guard([&] {
+    rtsp_stream::test_support::remove_session(first);
+    rtsp_stream::test_support::remove_session(second);
+    rtsp_stream::test_support::remove_session(pending);
+  });
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  const auto list = [&] {
+    const auto response = client->request("GET", "/api/sessions", "", headers);
+    EXPECT_EQ(response->status_code, "200 OK");
+    const auto body = nlohmann::json::parse(response->content.string());
+    EXPECT_EQ(body.at("status"), true);
+    return body.at("sessions");
+  };
+  const auto sessions = list();
+  ASSERT_EQ(sessions.size(), 2);
+  EXPECT_EQ(sessions.at(0), (nlohmann::json {{"device_id", "first"}, {"name", "Tablet"}, {"source", nullptr}}));
+  EXPECT_EQ(sessions.at(1), (nlohmann::json {{"device_id", "second"}, {"name", "Laptop"}, {"source", nullptr}}));
+
+  auto previous_output = video::test_support::publish_capture_output("previous monitor");
+  auto current_output = video::test_support::publish_capture_output("current monitor");
+  previous_output.reset();
+  const auto capturing = list();
+  ASSERT_EQ(capturing.size(), 2);
+  EXPECT_EQ(capturing.at(0).at("source"), "current monitor");
+  EXPECT_EQ(capturing.at(1).at("source"), "current monitor");
+  current_output.reset();
+
+  rtsp_stream::test_support::remove_session(first);
+  const auto remaining = list();
+  ASSERT_EQ(remaining.size(), 1);
+  EXPECT_EQ(remaining.front().at("device_id"), "second");
+  EXPECT_TRUE(remaining.front().at("source").is_null());
+}
+
+TEST_F(ConfigHttpTest, DisplayEndpointReturnsAnArray) {
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  const auto response = client->request("GET", "/api/displays", "", headers);
+  ASSERT_EQ(response->status_code, "200 OK");
+  const auto body = nlohmann::json::parse(response->content.string());
+  EXPECT_EQ(body.at("status"), true);
+  EXPECT_TRUE(body.at("displays").is_array());
 }
 
 TEST_F(ConfigHttpTest, PairingRestApiRejectsMalformedFieldsWithoutConsumingRequest) {

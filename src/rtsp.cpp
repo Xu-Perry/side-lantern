@@ -11,6 +11,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
@@ -28,6 +29,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -591,6 +593,21 @@ namespace rtsp_stream {
       return (int) _session_slots->size();
     }
 
+    /**
+     * @brief Copy the connected session identities under the session registry lock.
+     * @return Point-in-time identities of the active streams.
+     */
+    std::vector<active_session_t> active_sessions() {
+      auto lock = _session_slots.lock();
+      std::vector<active_session_t> sessions;
+      for (const auto &session : *_session_slots) {
+        if (auto identity = stream::session::active_identity(*session)) {
+          sessions.push_back(std::move(*identity));
+        }
+      }
+      return sessions;
+    }
+
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;  ///< Launch event.
 
     /**
@@ -636,23 +653,46 @@ namespace rtsp_stream {
     }
 
     /**
-     * @brief Removes the provided session from the set of sessions.
-     * @param session The session to remove.
+     * @brief Start and register a stream while excluding concurrent session teardown.
+     * @param session Newly allocated streaming session to start.
+     * @param ticket TLS-authenticated identity carried from the launch or resume request.
+     * @param peer_address Remote address of the RTSP stream peer.
+     * @return RTSP status code for the start attempt.
      */
-    void remove(const std::shared_ptr<stream::session_t> &session) {
-      auto lg = _session_slots.lock();
-      _session_slots->erase(session);
+    int start_session(const std::shared_ptr<stream::session_t> &session, const launch_session_t &ticket, const std::string &peer_address) {
+      auto lock = _session_slots.lock();
+      // A client can be revoked after HTTPS launch and before it opens RTSP.
+      if (!nvhttp::is_authorized_stream_client(ticket.client_uuid, ticket.client_cert)) {
+        return 403;
+      }
+      const auto slot = _session_slots->emplace(session).first;
+      if (stream::session::start(*session, peer_address)) {
+        _session_slots->erase(slot);
+        return 500;
+      }
+      BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+      return 200;
+    }
+
+#ifdef SUNSHINE_TESTS
+    /**
+     * @brief Register a threadless session for snapshot tests.
+     * @param session Test session to insert.
+     */
+    void insert(const std::shared_ptr<stream::session_t> &session) {
+      auto lock = _session_slots.lock();
+      _session_slots->emplace(session);
     }
 
     /**
-     * @brief Inserts the provided session into the set of sessions.
-     * @param session The session to insert.
+     * @brief Erase a threadless session after testing.
+     * @param session Test session to remove.
      */
-    void insert(const std::shared_ptr<stream::session_t> &session) {
-      auto lg = _session_slots.lock();
-      _session_slots->emplace(session);
-      BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+    void remove(const std::shared_ptr<stream::session_t> &session) {
+      auto lock = _session_slots.lock();
+      _session_slots->erase(session);
     }
+#endif
 
     /**
      * @brief Runs an iteration of the RTSP server loop
@@ -707,6 +747,26 @@ namespace rtsp_stream {
 
     return server.session_count();
   }
+
+  std::vector<active_session_t> active_sessions() {
+    auto sessions = server.active_sessions();
+    std::ranges::sort(sessions, {}, &active_session_t::device_id);
+    return sessions;
+  }
+
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected) {
+      auto session = stream::session::test_support::make_session({std::move(device_id), std::move(name)}, connected);
+      server.insert(session);
+      return session;
+    }
+
+    void remove_session(const std::shared_ptr<stream::session_t> &session) {
+      server.remove(session);
+    }
+  }  // namespace test_support
+#endif
 
   void terminate_sessions() {
     server.clear(true);
@@ -1254,12 +1314,13 @@ namespace rtsp_stream {
     }
 
     auto stream_session = stream::session::alloc(config, session);
-    rtsp_server->insert(stream_session);
-
-    if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
+    const auto status = rtsp_server->start_session(stream_session, session, sock.remote_endpoint().address().to_string());
+    if (status == 403) {
+      respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+      return;
+    }
+    if (status != 200) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
-
-      rtsp_server->remove(stream_session);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }

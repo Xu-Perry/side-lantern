@@ -166,6 +166,19 @@ namespace platf {
   decltype(WlanSetInterface) *fn_WlanSetInterface = nullptr;  ///< Fn wlan set interface.
 
   std::filesystem::path appdata() {
+    // The SideLantern service sets this for its unprivileged interactive worker.
+    // The original Sunshine runtime keeps its executable-relative profile.
+    if (const auto capacity = GetEnvironmentVariableW(L"SIDELANTERN_ENGINE_CONFIG_DIR", nullptr, 0); capacity > 1) {
+      std::wstring configured(capacity, L'\0');
+      const auto length = GetEnvironmentVariableW(L"SIDELANTERN_ENGINE_CONFIG_DIR", configured.data(), capacity);
+      if (length > 0 && length < capacity) {
+        configured.resize(length);
+        std::filesystem::path directory {configured};
+        if (directory.is_absolute()) {
+          return directory;
+        }
+      }
+    }
     std::array<WCHAR, MAX_PATH> sunshine_path;
     GetModuleFileNameW(nullptr, sunshine_path.data(), sunshine_path.size());
     return std::filesystem::path {sunshine_path.data()}.remove_filename() / L"config"sv;

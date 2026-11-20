@@ -7,7 +7,9 @@
 // standard includes
 #include <chrono>
 #include <deque>
+#include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -34,6 +36,23 @@ namespace stream {
 }
 
 namespace video {
+  /**
+   * @brief Return the platform output name of the initialized shared capture.
+   * @return Output name, or an empty string before capture, during reinit, or when capture stops.
+   */
+  std::string active_capture_output();
+
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    /**
+     * @brief Publish a sample through the production capture-output snapshot.
+     * @param name Sample platform output name.
+     * @return Capture lifetime handle whose destruction ends the sample.
+     */
+    std::shared_ptr<const std::string> publish_capture_output(std::string name);
+  }  // namespace test_support
+#endif
+
 
   /**
    * @brief Encoding configuration requested by a remote client.

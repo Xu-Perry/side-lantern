@@ -9,10 +9,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 // local includes
 #include "crypto.h"
 #include "thread_safe.h"
+
+namespace stream {
+  struct session_t;
+}
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;  ///< GameStream base-port offset used for the RTSP setup listener.
@@ -94,11 +100,20 @@ namespace rtsp_stream {
     bool enable_hdr;  ///< Whether HDR streaming is requested.
     bool enable_sops;  ///< Whether sequence output protection is requested.
     std::string client_name;  ///< Friendly client name from initial pairing.
+    std::string client_uuid;  ///< Persistent paired device ID authenticated by the HTTPS connection.
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;  ///< AES-GCM cipher used once encrypted RTSP is negotiated.
     std::string rtsp_url_scheme;  ///< URL scheme selected by the RTSP SETUP flow.
     uint32_t rtsp_iv_counter;  ///< Counter value mixed into encrypted RTSP IVs.
     std::string client_cert;  ///< PEM certificate for the paired Moonlight client.
+  };
+
+  /**
+   * @brief Public identity of a paired client with an active streaming session.
+   */
+  struct active_session_t {
+    std::string device_id;  ///< Persistent paired device UUID.
+    std::string name;  ///< Friendly device name supplied during pairing.
   };
 
   /**
@@ -121,6 +136,12 @@ namespace rtsp_stream {
   int session_count();
 
   /**
+   * @brief Snapshot the running streams with a connected control peer.
+   * @return Paired client identities for the connected streams.
+   */
+  std::vector<active_session_t> active_sessions();
+
+  /**
    * @brief Terminates all running streaming sessions.
    */
   void terminate_sessions();
@@ -135,4 +156,23 @@ namespace rtsp_stream {
    * @brief Runs the RTSP server loop.
    */
   void start();
+
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    /**
+     * @brief Insert a threadless session into the production snapshot registry.
+     * @param device_id Persistent paired device UUID.
+     * @param name Friendly device name.
+     * @param connected Whether the session has established its control channel.
+     * @return Session handle to remove from the registry after the test.
+     */
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected);
+
+    /**
+     * @brief Remove a threadless session after testing the session registry.
+     * @param session Session previously returned by insert_session().
+     */
+    void remove_session(const std::shared_ptr<stream::session_t> &session);
+  }  // namespace test_support
+#endif
 }  // namespace rtsp_stream

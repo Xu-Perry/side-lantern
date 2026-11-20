@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>SideLantern</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./i18n.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>SideLantern</strong></div>
+      <nav class="navigation" aria-label="主导航" data-i18n-label="navigation">
+        <button type="button" class="nav-button" data-page="host" aria-current="page"><span class="nav-icon monitor" aria-hidden="true"></span><span data-i18n="streamingHost">串流主机</span></button>
+        <button type="button" class="nav-button" data-page="stream"><span class="nav-icon sliders" aria-hidden="true">≡</span><span data-i18n="streamingSettings">串流设置</span></button>
+        <button type="button" class="nav-button" data-page="display"><span class="nav-icon display" aria-hidden="true"></span><span data-i18n="virtualDisplay">虚拟显示器</span></button>
+      </nav>
+      <button type="button" class="nav-button preferences" id="open-preferences"><span class="nav-icon gear" aria-hidden="true">⚙</span><span data-i18n="appSettings">应用设置</span></button>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-bar">
+        <span id="breadcrumb">串流主机</span>
+      </header>
+
+      <div class="page-content">
+        <div id="action-notice" class="notice" role="alert" hidden>
+          <span id="action-message"></span>
+          <button type="button" id="dismiss-notice" class="text-button" data-i18n="close">关闭</button>
+        </div>
+
+        <section data-panel="host">
+          <header class="page-heading">
+            <h1 data-i18n="streamingHost">串流主机</h1>
+            <button type="button" class="button" id="refresh" data-i18n="refresh">刷新状态</button>
+          </header>
+
+          <div class="host-status">
+            <div class="host-copy">
+              <div class="status-label" id="host-phase" data-phase="loading" role="status" data-i18n="loadingStatus">正在读取状态</div>
+              <h2 id="hostname">SideLantern</h2>
+              <p id="host-address" class="address" hidden><span data-i18n="lanAddress">局域网地址</span><code id="address-value"></code></p>
+            </div>
+            <div class="host-actions">
+              <button type="button" id="service-toggle" class="button primary" disabled data-i18n="startService">启动服务</button>
+            </div>
+          </div>
+          <p class="host-error notice" id="host-error" role="status" hidden></p>
+
+          <section class="card" aria-labelledby="pair-heading">
+            <div class="card-heading"><h2 id="pair-heading" data-i18n="pairingRequests">配对请求</h2><button type="button" id="legacy-pair" class="button" hidden data-i18n="enterMoonlightPin">输入 Moonlight PIN</button></div>
+            <p class="empty-text" id="pair-empty" data-i18n="startPairing">在 Moonlight 中选择此主机，发起配对。</p>
+            <ul class="item-list" id="pairings" hidden></ul>
+          </section>
+
+          <section class="card" aria-labelledby="activity-heading">
+            <div class="card-heading"><h2 id="activity-heading" data-i18n="activeStreams">当前串流</h2><span class="count" id="session-count" hidden></span></div>
+            <p class="empty-text" id="session-empty" data-i18n="loadingConnections">正在读取连接状态。</p>
+            <ul class="item-list" id="sessions" hidden></ul>
+          </section>
+
+          <section class="card" aria-labelledby="devices-heading">
+            <div class="card-heading"><h2 id="devices-heading" data-i18n="pairedDevices">已配对设备</h2><span class="count" id="device-count" hidden></span></div>
+            <p class="empty-text" id="device-empty" data-i18n="loadingDevices">正在读取配对记录。</p>
+            <ul class="item-list" id="devices" hidden></ul>
+            <p class="card-footnote" id="device-cache" hidden data-i18n="cachedDevices">服务已停止。显示最近读取的配对记录。</p>
+          </section>
+        </section>
+
+        <section data-panel="stream" hidden>
+          <header class="page-heading"><h1 data-i18n="streamingSettings">串流设置</h1></header>
+          <p class="page-intro" data-i18n="streamingSettingsIntro">主屏和虚拟副屏共用主机设置。串流分辨率、帧率和目标码率在 Moonlight 中选择。</p>
+          <form id="stream-form">
+            <fieldset id="stream-fields" disabled>
+              <div class="card">
+                <div class="setting-row">
+                  <div><label for="source" data-i18n="streamingSource">串流来源</label><p id="source-note" data-i18n="defaultSource">主显示器为默认来源。</p></div>
+                  <select id="source" disabled>
+                    <option value="primary" data-i18n="primaryDisplay">主显示器</option>
+                    <option id="source-virtual" value="virtual" hidden data-i18n="virtualMonitor">虚拟副屏</option>
+                    <option id="source-configured" value="configured" disabled hidden data-i18n="configuredDisplay">已配置的显示器</option>
+                  </select>
+                </div>
+                <div class="setting-row">
+                  <div><label for="encoder" data-i18n="encoder">编码器</label><p data-i18n="encoderHelp">自动选择可用的编码器。</p></div>
+                  <select id="encoder" name="encoder">
+                    <option value="auto" data-i18n="automatic">自动</option>
+                    <option value="nvenc">NVIDIA NVENC</option>
+                    <option value="quicksync">Intel Quick Sync</option>
+                    <option value="amdvce">AMD AMF</option>
+                    <option value="software" data-i18n="softwareEncoding">软件编码</option>
+                  </select>
+                </div>
+                <div class="setting-row">
+                  <div><label for="bitrate" data-i18n="bitrateLimit">码率上限</label><p id="bitrate-note" data-i18n="bitrateHelp">填 0 时采用 Moonlight 请求的码率。</p></div>
+                  <div class="unit-control"><input id="bitrate" type="number" name="maxBitrateMbps" min="0" step="0.001" value="0" required aria-describedby="bitrate-note"><span>Mbps</span></div>
+                </div>
+                <div class="setting-row">
+                  <div><span class="setting-label" data-i18n="videoFormat">视频格式</span><p data-i18n="videoFormatHelp">自动模式根据编码器能力提供支持。</p></div>
+                  <div class="inline-controls">
+                    <label class="small-field">HEVC<select name="hevc"><option value="auto" data-i18n="automatic">自动</option><option value="disabled" data-i18n="disabled">禁用</option></select></label>
+                    <label class="small-field">AV1<select name="av1"><option value="auto" data-i18n="automatic">自动</option><option value="disabled" data-i18n="disabled">禁用</option></select></label>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div><label for="audio" data-i18n="hostAudio">传输主机声音</label></div>
+                  <label class="switch-label"><input type="checkbox" id="audio" name="audio" checked><span data-i18n="enabled">启用</span></label>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="button primary" id="save-settings" disabled data-i18n="saveAndApply">保存并应用</button>
+                <p id="stream-feedback" class="muted" role="status" data-i18n="startServiceForSettings">启动服务后可读取和修改设置。</p>
+              </div>
+            </fieldset>
+          </form>
+        </section>
+
+        <section data-panel="display" hidden>
+          <header class="page-heading"><h1 data-i18n="virtualDisplay">虚拟显示器</h1></header>
+          <div class="card display-status">
+            <span class="display-large" aria-hidden="true"></span>
+            <div>
+              <h2 id="display-title" data-i18n="probingDisplay">正在检测虚拟显示器</h2>
+              <p id="display-reason" class="muted"></p>
+              <p id="display-mode" class="muted" hidden></p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="preferences-dialog" aria-labelledby="preferences-heading">
+    <header class="dialog-heading"><h2 id="preferences-heading" data-i18n="appSettings">应用设置</h2><button type="button" class="text-button" data-close data-i18n="close">关闭</button></header>
+    <div class="setting-row">
+      <div><label for="language" data-i18n="language">语言</label><p data-i18n="appliesImmediately">切换立即生效。</p></div>
+      <select id="language" disabled><option value="zh-CN" lang="zh-CN">简体中文</option><option value="en" lang="en">English</option></select>
+    </div>
+    <div class="setting-row">
+      <div><label for="theme" data-i18n="theme">主题</label><p data-i18n="appliesImmediately">切换立即生效。</p></div>
+      <select id="theme" disabled><option value="system" data-i18n="systemTheme">跟随系统</option><option value="light" data-i18n="lightTheme">浅色</option><option value="dark" data-i18n="darkTheme">深色</option></select>
+    </div>
+    <div class="setting-row">
+      <div><label for="launch-login" data-i18n="launchAtLogin">登录 Windows 时启动</label><p data-i18n="launchAtLoginHelp">登录后在托盘启动并运行串流主机。</p></div>
+      <label class="switch-label"><input type="checkbox" id="launch-login" disabled><span data-i18n="enabled">启用</span></label>
+    </div>
+    <div class="setting-row"><span class="setting-label" data-i18n="logs">日志</span><button type="button" class="button" id="open-logs" data-i18n="openLogs">打开日志目录</button></div>
+    <div class="setting-row version-row"><span class="setting-label" data-i18n="version">SideLantern 版本</span><code id="version" data-i18n="versionLoading">读取中</code></div>
+    <p class="inline-message" id="preferences-feedback" role="status" hidden></p>
+  </dialog>
+
+  <dialog id="pair-dialog" aria-labelledby="pin-heading">
+    <form id="pin-form">
+      <h2 id="pin-heading" data-i18n="moonlightPairing">Moonlight 配对</h2>
+      <p class="dialog-detail" id="pair-detail"></p>
+      <label class="field-label"><span data-i18n="deviceName">设备名称</span><input id="pair-name" name="name" type="text" maxlength="64" required></label>
+      <label class="field-label"><span data-i18n="pairingCode">四位配对码</span><input id="pair-pin" name="pin" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]{4}" maxlength="4" required placeholder="0000"></label>
+      <p class="inline-message error" id="pair-feedback" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button" data-close data-i18n="back">返回</button><button type="submit" class="button primary" id="approve-pin" data-i18n="confirmPairing">确认配对</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-heading">
+    <h2 id="confirm-heading"></h2>
+    <p class="dialog-detail" id="confirm-detail"></p>
+    <div class="dialog-actions"><button type="button" class="button" data-close autofocus data-i18n="back">返回</button><button type="button" class="button primary" id="confirm-action"></button></div>
+  </dialog>
+</body>
+</html>

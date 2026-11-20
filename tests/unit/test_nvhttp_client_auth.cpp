@@ -10,9 +10,13 @@
 // standard includes
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <type_traits>
 #include <vector>
+
+// lib includes
+#include <Simple-Web-Server/client_https.hpp>
 
 // local includes
 #include <src/config.h>
@@ -97,6 +101,56 @@ TEST_F(ClientAuthorizationTest, DerivedLeafDoesNotInheritPairedAuthorization) {
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(derived_credentials.x509));
 }
 
+TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentity) {
+  const auto server_credentials = crypto::gen_creds("Sunshine test host", 2048);
+  const auto first_credentials = test_utils::certificates::generate_ca_credentials("Sunshine first client");
+  const auto second_credentials = test_utils::certificates::generate_ca_credentials("Sunshine second client");
+  const auto first_id = nvhttp::test_support::add_client("first", first_credentials.x509, true);
+  const auto second_id = nvhttp::test_support::add_client("second", second_credentials.x509, true);
+  ASSERT_FALSE(first_id.empty());
+  ASSERT_FALSE(second_id.empty());
+
+  const auto directory = fs::path {SUNSHINE_TEST_BIN_DIR} / "https_paired_client_identity";
+  ASSERT_TRUE(fs::create_directories(directory) || fs::is_directory(directory));
+  auto cleanup = util::fail_guard([&] {
+    std::error_code error;
+    fs::remove_all(directory, error);
+  });
+  std::ofstream {directory / "host.cert"} << server_credentials.x509;
+  std::ofstream {directory / "host.key"} << server_credentials.pkey;
+  std::ofstream {directory / "first.cert"} << first_credentials.x509;
+  std::ofstream {directory / "first.key"} << first_credentials.pkey;
+  std::ofstream {directory / "second.cert"} << second_credentials.x509;
+  std::ofstream {directory / "second.key"} << second_credentials.pkey;
+
+  std::shared_ptr<SimpleWeb::ScopeRunner> scope;
+  auto server = nvhttp::test_support::make_https_server(
+    (directory / "host.cert").string(), (directory / "host.key").string(), scope, true
+  );
+  server->io_service = std::make_shared<boost::asio::io_context>();
+  server->config.address = "127.0.0.1";
+  server->config.port = 0;
+  unsigned short port = 0;
+  server->start([&](const unsigned short assigned) { port = assigned; });
+  // With an external io_context, the listener's readiness callback runs when the test polls it.
+  ASSERT_EQ(server->io_service->poll_one(), 1);
+  ASSERT_NE(port, 0);
+  std::jthread worker {[&] { server->io_service->run(); }};
+  auto stop = util::fail_guard([&] { server->stop(); });
+
+  const auto address = "127.0.0.1:" + std::to_string(port);
+  SimpleWeb::Client<SimpleWeb::HTTPS> first {address, false, (directory / "first.cert").string(), (directory / "first.key").string()};
+  SimpleWeb::Client<SimpleWeb::HTTPS> second {address, false, (directory / "second.cert").string(), (directory / "second.key").string()};
+  first.config.timeout = first.config.timeout_connect = 2;
+  second.config.timeout = second.config.timeout_connect = 2;
+  EXPECT_EQ(first.request("GET", "/test-verified-client")->content.string(), first_id);
+  EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
+  EXPECT_EQ(first.request("GET", "/test-verified-client")->content.string(), first_id);
+  ASSERT_TRUE(nvhttp::unpair_client(first_id));
+  EXPECT_EQ(first.request("GET", "/test-verified-client")->status_code, "401 Unauthorized");
+  EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
+}
+
 TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {
   const auto enabled_credentials = test_utils::certificates::generate_ca_credentials("Sunshine Enabled Client");
   const auto disabled_credentials = crypto::gen_creds("Sunshine Disabled Client", 2048);
@@ -115,6 +169,9 @@ TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(enabled_credentials.x509));
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(disabled_credentials.x509));
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(expired_credentials.x509));
+  EXPECT_TRUE(nvhttp::is_authorized_stream_client(enabled_uuid, enabled_credentials.x509));
+  EXPECT_FALSE(nvhttp::is_authorized_stream_client(expired_uuid, enabled_credentials.x509));
+  EXPECT_FALSE(nvhttp::is_authorized_stream_client(disabled_uuid, disabled_credentials.x509));
 
   nvhttp::test_support::reset_client_state();
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(enabled_credentials.x509));
@@ -128,6 +185,8 @@ TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(disabled_credentials.x509));
   ASSERT_TRUE(nvhttp::unpair_client(enabled_uuid));
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(enabled_credentials.x509));
+  EXPECT_FALSE(nvhttp::is_authorized_stream_client(enabled_uuid, enabled_credentials.x509));
+  EXPECT_TRUE(nvhttp::is_authorized_stream_client(expired_uuid, expired_credentials.x509));
 
   nvhttp::erase_all_clients();
   nvhttp::test_support::reset_client_state();

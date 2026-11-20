@@ -554,6 +554,7 @@ namespace stream {
       std::string expected_peer_address;  ///< Expected address for legacy clients without `ML_FF_SESSION_ID_V1`.
 
       net::peer_t peer;  ///< Connected ENet peer for the control channel.
+      std::atomic_bool connected {false};  ///< Whether the stream has established its control peer.
       std::uint32_t seq;  ///< Sequence number for the next encrypted control message.
 
       platf::feedback_queue_t feedback_queue;  ///< Queue of controller feedback awaiting control-channel delivery.
@@ -562,6 +563,7 @@ namespace stream {
 
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
+    rtsp_stream::active_session_t client_identity;  ///< Paired client identity retained from the launch request.
     std::string input_session_id;  ///< Stable client identity used to retain input devices across resume.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
@@ -725,6 +727,7 @@ namespace stream {
       // Insert this into the map for O(1) lookups in the future
       auto ptslg = _peer_to_session.lock();
       _peer_to_session->emplace(peer, session_p);
+      session_p->control.connected.store(true, std::memory_order_relaxed);
       return session_p;
     }
 
@@ -2274,6 +2277,15 @@ namespace stream {
       return session.client_cert;
     }
 
+    std::optional<rtsp_stream::active_session_t> active_identity(const session_t &session) {
+      if (!session.control.connected.load(std::memory_order_relaxed) ||
+          session.state.load(std::memory_order_relaxed) != state_e::RUNNING ||
+          session.client_identity.device_id.empty()) {
+        return std::nullopt;
+      }
+      return session.client_identity;
+    }
+
     /**
      * @brief Stop the active streaming session and prevent new packets from being queued.
      */
@@ -2395,6 +2407,7 @@ namespace stream {
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
       session->client_cert = launch_session.client_cert;
+      session->client_identity = {launch_session.client_uuid, launch_session.client_name};
       session->input_session_id = launch_session.client_cert.empty() ? launch_session.unique_id : launch_session.client_cert;
 
       session->config = config;
@@ -2460,5 +2473,17 @@ namespace stream {
 
       return session;
     }
+
+#ifdef SUNSHINE_TESTS
+    namespace test_support {
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected) {
+        auto session = std::make_shared<session_t>();
+        session->client_identity = std::move(identity);
+        session->control.connected.store(connected, std::memory_order_relaxed);
+        session->state.store(state_e::RUNNING, std::memory_order_relaxed);
+        return session;
+      }
+    }  // namespace test_support
+#endif
   }  // namespace session
 }  // namespace stream

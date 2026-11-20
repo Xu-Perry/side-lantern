@@ -100,4 +100,7 @@ set(CPACK_COMPONENT_FIREWALL_GROUP "Scripts")
 
 # include specific packaging
 include(${CMAKE_MODULE_PATH}/packaging/windows_nsis.cmake)
-include(${CMAKE_MODULE_PATH}/packaging/windows_wix.cmake)
+option(SUNSHINE_BUILD_WIX_PACKAGE "Configure Sunshine's WiX installer" ON)
+if(SUNSHINE_BUILD_WIX_PACKAGE)
+    include(${CMAKE_MODULE_PATH}/packaging/windows_wix.cmake)
+endif()

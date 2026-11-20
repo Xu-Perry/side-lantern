@@ -1516,6 +1516,35 @@ namespace video {
   std::array<bool, 3> last_encoder_probe_supported_dynamic_range_for_codec = {};  ///< 10-bit 4:2:0 support discovered for each probed codec.
   std::array<bool, 3> last_encoder_probe_supported_dynamic_range_yuv444_for_codec = {};  ///< 10-bit YUV444 support discovered for each probed codec.
 
+  namespace {
+    sync_util::sync_t<std::weak_ptr<const std::string>> capture_output_name;  ///< Latest initialized output, retained by its capture thread only.
+
+    /**
+     * @brief Publish an output associated with the lifetime of an initialized capture.
+     * @param name Platform name used to initialize the display capture.
+     * @return Capture-owned handle that expires during reinitialization or when capture stops.
+     */
+    std::shared_ptr<const std::string> publish_capture_output(std::string name) {
+      auto output = std::make_shared<const std::string>(std::move(name));
+      capture_output_name = output;
+      return output;
+    }
+  }  // namespace
+
+  std::string active_capture_output() {
+    auto lock = capture_output_name.lock();
+    const auto output = capture_output_name->lock();
+    return output ? *output : std::string {};
+  }
+
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    std::shared_ptr<const std::string> publish_capture_output(std::string name) {
+      return video::publish_capture_output(std::move(name));
+    }
+  }  // namespace test_support
+#endif
+
   /**
    * @brief Recreate a display capture object after a capture failure.
    *
@@ -1640,6 +1669,7 @@ namespace video {
       return;
     }
     display_wp = disp;
+    auto capture_output = publish_capture_output(display_names[display_p]);
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -1787,6 +1817,7 @@ namespace video {
       switch (status) {
         case platf::capture_e::reinit:
           {
+            capture_output.reset();
             reinit_event.raise(true);
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
@@ -1841,6 +1872,7 @@ namespace video {
             }
 
             display_wp = disp;
+            capture_output = publish_capture_output(display_names[display_p]);
 
             reinit_event.reset();
             continue;
@@ -2832,6 +2864,7 @@ namespace video {
     if (!disp) {
       return encode_e::capture_error;
     }
+    const auto capture_output = publish_capture_output(display_names[display_p]);
 
     auto img = disp->alloc_img();
     if (!img || disp->dummy_img(img.get())) {

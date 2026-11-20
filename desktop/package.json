@@ -1,0 +1,17 @@
+{
+  "name": "side-lantern",
+  "productName": "SideLantern",
+  "version": "0.1.0-dev.1",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-isolation=none test/*.test.cjs renderer/app.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.4.1"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <optional>
 #include <utility>
 
 // lib includes
@@ -13,6 +14,7 @@
 // local includes
 #include "audio.h"
 #include "crypto.h"
+#include "rtsp.h"
 #include "video.h"
 
 namespace stream {
@@ -94,5 +96,24 @@ namespace stream {
      * @return PEM certificate associated with the session's client.
      */
     const std::string &client_cert(session_t &session);
+
+    /**
+     * @brief Read a session's paired identity only when its control channel is connected and running.
+     * @param session Session to inspect.
+     * @return Paired device identity when the stream is active.
+     */
+    std::optional<rtsp_stream::active_session_t> active_identity(const session_t &session);
+
+#ifdef SUNSHINE_TESTS
+    namespace test_support {
+      /**
+       * @brief Construct a session without starting workers for snapshot tests.
+       * @param identity Identity to associate with the paired client.
+       * @param connected Whether the control channel has connected.
+       * @return Threadless sample session.
+       */
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected);
+    }  // namespace test_support
+#endif
   }  // namespace session
 }  // namespace stream
