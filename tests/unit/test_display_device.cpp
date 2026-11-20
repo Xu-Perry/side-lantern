@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <format>
 #include <mutex>
 #include <thread>
@@ -573,12 +574,18 @@ namespace {
       using enum device_prep_t;
       if (config.m_device_prep == EnsureOnlyDisplay || config.m_device_prep == EnsureActive) {
         std::lock_guard lock {mutex};
-        saved_layout = devices;
+        if (reject_resolution && config.m_resolution) {
+          return ApplyResult::DisplayModePrepFailed;
+        }
+        if (saved_layout.empty()) {
+          saved_layout = devices;
+        }
         for (auto &device : devices) {
           if (device.m_device_id == config.m_device_id) {
             const auto only_display = config.m_device_prep == EnsureOnlyDisplay;
             device.m_display_name = device.m_device_id;
             device.m_info.emplace();
+            device.m_info->m_resolution = config.m_resolution.value_or(resolution_t {1366, 768});
             device.m_info->m_primary = only_display;
             device.m_info->m_origin_point.m_x = only_display ? 0 : 1920;
           } else if (config.m_device_prep == EnsureOnlyDisplay) {
@@ -639,6 +646,12 @@ namespace {
       keep_pending = pending;
     }
 
+    /** @brief Simulate an unsupported mode on a virtual display. @param reject Whether to reject explicit resolutions. */
+    void set_reject_resolution(bool reject) {
+      std::lock_guard lock {mutex};
+      reject_resolution = reject;
+    }
+
     /**
      * @brief Revert counters observed by a test.
      */
@@ -681,6 +694,7 @@ namespace {
     bool keep_pending {true};  ///< When true, a successful revert still leaves the saved record in place.
     bool pending_saved {false};  ///< True when the latest revert left a saved record.
     bool hdr_restored {false};  ///< True when redocking cleared the pending record.
+    bool reject_resolution {false};  ///< Reject resolution changes while still accepting layout preparation.
     mutable std::mutex mutex;  ///< Guards the device list and revert bookkeeping.
   };
 
@@ -763,6 +777,80 @@ TEST(DisplayStreamMode, ExtendedModeActivatesVirtualDisplayAndRestoresOriginalLa
   EXPECT_TRUE(extended[1].m_info.has_value());
   claim.reset();
   EXPECT_EQ(display_device::enumerate_devices(), devices);
+}
+
+TEST(DisplayStreamMode, RemembersChangedVirtualDesktopResolutionAcrossSessionsAndRestart) {
+  using enum display_device::stream_mode_e;
+  const auto settings_file = std::filesystem::current_path() / std::format("virtual-display-resolution-{}.json", std::chrono::steady_clock::now().time_since_epoch().count());
+  auto cleanup = util::fail_guard([&] {
+    std::error_code error;
+    std::filesystem::remove(settings_file, error);
+  });
+  [[maybe_unused]] const display_device_revert_guard_t guard;
+  const display_device::EnumeratedDeviceList initial {active_display("main", true, 0), {.m_device_id = "virtual"}, {.m_device_id = "another"}};
+  const auto install_manager = [&] {
+    const auto persistence = display_device::test_make_watched_persistence();
+    auto manager = std::make_unique<redock_settings_manager_t>(persistence);
+    auto *instance = manager.get();
+    manager->set_devices(initial);
+    manager->set_keep_pending(false);
+    display_device::test_install_settings_manager(std::move(manager), persistence, settings_file);
+    return instance;
+  };
+
+  auto *manager = install_manager();
+  const auto extended = display_device::select_stream_display(extend, initial, "virtual", {"virtual", "another"});
+  auto claim = display_device::prepare_stream_display(extend, extended);
+  ASSERT_TRUE(claim);
+  auto active = display_device::enumerate_devices();
+  ASSERT_TRUE(active[1].m_info);
+  const resolution_t chosen {2560, 1600};
+  active[1].m_info->m_resolution = chosen;
+  manager->set_devices(active);
+  claim.reset();
+  EXPECT_EQ(display_device::enumerate_devices(), initial);
+  EXPECT_TRUE(std::filesystem::is_regular_file(settings_file));
+
+  display_device::test_reset_display_device();
+  manager = install_manager();
+  manager->set_reject_resolution(true);
+  claim = display_device::prepare_stream_display(extend, extended);
+  ASSERT_TRUE(claim);
+  active = display_device::enumerate_devices();
+  ASSERT_TRUE(active[1].m_info);
+  EXPECT_EQ(active[1].m_info->m_resolution, (resolution_t {1366, 768}));
+  claim.reset();
+
+  manager->set_reject_resolution(false);
+  claim = display_device::prepare_stream_display(extend, extended);
+  ASSERT_TRUE(claim);
+  active = display_device::enumerate_devices();
+  ASSERT_TRUE(active[1].m_info);
+  EXPECT_EQ(active[1].m_info->m_resolution, chosen);
+  EXPECT_EQ(active[0], initial[0]);
+  const resolution_t changed_again {1920, 1080};
+  active[1].m_info->m_resolution = changed_again;
+  manager->set_devices(active);
+  display_device::revert_configuration();
+  claim.reset();
+  EXPECT_EQ(display_device::enumerate_devices(), initial);
+
+  const auto only_virtual = display_device::select_stream_display(secondary, initial, "virtual", {"virtual", "another"});
+  claim = display_device::prepare_stream_display(secondary, only_virtual);
+  ASSERT_TRUE(claim);
+  active = display_device::enumerate_devices();
+  ASSERT_TRUE(active[1].m_info);
+  EXPECT_EQ(active[1].m_info->m_resolution, changed_again);
+  claim.reset();
+
+  const auto other = display_device::select_stream_display(secondary, initial, "another", {"virtual", "another"});
+  claim = display_device::prepare_stream_display(secondary, other);
+  ASSERT_TRUE(claim);
+  active = display_device::enumerate_devices();
+  ASSERT_TRUE(active[2].m_info);
+  EXPECT_EQ(active[2].m_info->m_resolution, (resolution_t {1366, 768}));
+  claim.reset();
+  EXPECT_EQ(display_device::enumerate_devices(), initial);
 }
 
 TEST(DisplayStreamMode, FailedExtensionRestoresLayoutAndReleasesCapture) {

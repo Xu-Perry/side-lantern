@@ -165,6 +165,7 @@ namespace display_device {
     std::string display_name;  ///< Current platform capture name used for encoder probing.
     std::string_view reason;  ///< Empty for a valid target, otherwise the protocol failure reason.
     bool needs_activation {false};  ///< The target is available but not yet active in Windows.
+    bool is_mttvdd {false};  ///< The target was matched to the MttVDD hardware ID.
   };
 
   /** @brief Find the IDs of available Windows monitor targets backed by the bundled MttVDD driver.
@@ -237,8 +238,9 @@ namespace display_device {
    * @brief Install a settings manager and the persistence object the revert loop watches.
    * @param manager Settings manager used by later revert calls.
    * @param persistence Persistence object returned by `test_make_watched_persistence()`.
+   * @param resolution_file Optional per-profile virtual display settings file.
    */
-  void test_install_settings_manager(std::unique_ptr<SettingsManagerInterface> manager, const std::shared_ptr<SettingsPersistenceInterface> &persistence);
+  void test_install_settings_manager(std::unique_ptr<SettingsManagerInterface> manager, const std::shared_ptr<SettingsPersistenceInterface> &persistence, const std::filesystem::path &resolution_file = {});
 
   /**
    * @brief Override how long the revert loop waits between device checks.

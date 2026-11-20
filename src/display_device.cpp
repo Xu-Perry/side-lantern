@@ -11,10 +11,13 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <fstream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <regex>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // lib includes
@@ -24,6 +27,7 @@
 #include <display_device/json.h>
 #include <display_device/retry_scheduler.h>
 #include <display_device/settings_manager_interface.h>
+#include <nlohmann/json.hpp>
 
 // local includes
 #include "audio.h"
@@ -116,6 +120,12 @@ namespace display_device {
       bool pending_restores {false};  ///< True while a non-empty settings record is stored.
     };
 
+    /** @brief Virtual desktop state sampled before the session starts streaming. */
+    struct virtual_resolution_observation_t {
+      std::string device_id;  ///< Stable ID of the virtual display.
+      Resolution initial;  ///< Desktop resolution after temporary layout preparation.
+    };
+
     /**
      * @brief A global for the settings manager interface and other settings whose lifetime is managed by `display_device::init(...)`.
      */
@@ -124,6 +134,8 @@ namespace display_device {
       std::chrono::milliseconds config_revert_delay {0};
       std::unique_ptr<RetryScheduler<SettingsManagerInterface>> sm_instance {nullptr};
       std::shared_ptr<watched_settings_persistence_t> persistence_watch {};  ///< Observes whether revert left settings stored.
+      std::filesystem::path virtual_resolution_file;  ///< Per-profile store separate from temporary layout recovery.
+      std::optional<virtual_resolution_observation_t> virtual_resolution;  ///< Active virtual screen whose desktop mode may have changed.
 #ifdef SUNSHINE_TESTS
       std::optional<std::chrono::milliseconds> test_retry_interval {};  ///< Override for the revert retry delay.
 #endif
@@ -843,11 +855,103 @@ namespace display_device {
       tried_out_devices.swap(available_devices);
     }
 
+    /** @brief Load the per-profile virtual desktop resolutions.
+     * @param path Settings file location.
+     * @return JSON object keyed by stable virtual display ID.
+     */
+    nlohmann::json load_virtual_resolutions(const std::filesystem::path &path) {
+      std::ifstream file {path, std::ios::binary};
+      if (file) {
+        auto stored = nlohmann::json::parse(file, nullptr, false);
+        if (stored.is_object()) {
+          return stored;
+        }
+      }
+      return nlohmann::json::object();
+    }
+
+    /** @brief Read a user-selected desktop resolution from the profile.
+     * @param path Settings file location.
+     * @param device_id Stable virtual display ID.
+     * @return Saved resolution when valid.
+     */
+    std::optional<Resolution> load_virtual_resolution(const std::filesystem::path &path, const std::string &device_id) {
+      const auto stored = load_virtual_resolutions(path);
+      const auto it = stored.find(device_id);
+      const auto valid_dimension = [](const auto &value) {
+        return value.is_number_unsigned() && value.template get<std::uint64_t>() > 0 &&
+               value.template get<std::uint64_t>() <= std::numeric_limits<unsigned int>::max();
+      };
+      if (it == stored.end() || !it->is_array() || it->size() != 2 || !valid_dimension((*it)[0]) || !valid_dimension((*it)[1])) {
+        return std::nullopt;
+      }
+      return Resolution {(*it)[0].get<unsigned int>(), (*it)[1].get<unsigned int>()};
+    }
+
+    /** @brief Atomically update one virtual display's preferred resolution.
+     * @param path Settings file location.
+     * @param device_id Stable virtual display ID.
+     * @param resolution Desktop resolution selected in Windows.
+     */
+    void store_virtual_resolution(const std::filesystem::path &path, const std::string &device_id, const Resolution &resolution) {
+      auto stored = load_virtual_resolutions(path);
+      stored[device_id] = {resolution.m_width, resolution.m_height};
+      auto temporary = path;
+      temporary += ".tmp";
+      std::ofstream file {temporary, std::ios::binary | std::ios::trunc};
+      file << stored.dump(2) << '\n';
+      file.close();
+      std::error_code error;
+      if (file) {
+        std::filesystem::rename(temporary, path, error);
+        if (!error) {
+          return;
+        }
+      }
+      BOOST_LOG(warning) << "Could not remember the virtual desktop resolution at " << path;
+      std::filesystem::remove(temporary, error);
+    }
+
+    /** @brief Read the current desktop resolution of a particular active display.
+     * @param devices Display topology snapshot.
+     * @param id Stable display ID.
+     * @return Resolution if the display is still active and reports valid dimensions.
+     */
+    std::optional<Resolution> active_resolution(const EnumeratedDeviceList &devices, const std::string &id) {
+      const auto it = std::ranges::find(devices, id, &EnumeratedDevice::m_device_id);
+      if (it == devices.end() || !it->m_info) {
+        return std::nullopt;
+      }
+      const auto &resolution = it->m_info->m_resolution;
+      return resolution.m_width && resolution.m_height ? std::optional {resolution} : std::nullopt;
+    }
+
+    /** @brief Remember changes to the virtual desktop before Windows restores the original layout.
+     * @note The caller must hold DD_DATA.mutex.
+     */
+    void remember_virtual_resolution_unlocked() {
+      const auto observed = std::exchange(DD_DATA.virtual_resolution, std::nullopt);
+      if (!observed || !DD_DATA.sm_instance) {
+        return;
+      }
+      try {
+        const auto current = DD_DATA.sm_instance->execute([&](auto &settings_iface) {
+          return active_resolution(settings_iface.enumAvailableDevices(), observed->device_id);
+        });
+        if (current && *current != observed->initial) {
+          store_virtual_resolution(DD_DATA.virtual_resolution_file, observed->device_id, *current);
+        }
+      } catch (const std::exception &error) {
+        BOOST_LOG(warning) << "Could not remember the virtual desktop resolution: " << error.what();
+      }
+    }
+
     /**
      * @brief Reverts the configuration based on the provided option.
      * @note This is function does not lock mutex.
      */
     void revert_configuration_unlocked(const revert_option_e option) {
+      remember_virtual_resolution_unlocked();
       if (!DD_DATA.sm_instance) {
         // Platform is not supported, nothing to do.
         return;
@@ -878,6 +982,7 @@ namespace display_device {
     // We can support re-init without any issues, however we should make sure to clean up first!
     revert_configuration_unlocked(revert_option_e::try_once);
     DD_DATA.config_revert_delay = video_config.dd.config_revert_delay;
+    DD_DATA.virtual_resolution_file = persistence_filepath.parent_path() / "virtual_display_resolutions.json";
     DD_DATA.sm_instance = nullptr;
 
     // If we fail to create settings manager, this means platform is not supported, and
@@ -1131,7 +1236,7 @@ namespace display_device {
     if (mode == stream_mode_e::secondary && std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) != (needs_activation ? 1 : 2)) {
       return {.reason = "other_displays_active"};
     }
-    return {target->m_device_id, target->m_display_name, {}, needs_activation};
+    return {target->m_device_id, target->m_display_name, {}, needs_activation, virtual_targets.contains(target->m_device_id)};
   }
 
   namespace {
@@ -1141,12 +1246,17 @@ namespace display_device {
     class stream_display_claim_t final: public platf::deinit_t {
     public:
       bool restore_layout {false};  ///< Whether applying the temporary layout was attempted.
+      bool remember_resolution {false};  ///< Whether a virtual desktop resolution is tracked for this capture.
 
       /** @brief Restore the display configuration before allowing another launch. */
       ~stream_display_claim_t() override {
-        if (restore_layout) {
+        if (restore_layout || remember_resolution) {
           std::lock_guard lock {DD_DATA.mutex};
-          revert_configuration_unlocked(revert_option_e::try_indefinitely);
+          if (restore_layout) {
+            revert_configuration_unlocked(revert_option_e::try_indefinitely);
+          } else {
+            remember_virtual_resolution_unlocked();
+          }
         }
         explicit_capture_claimed = false;
       }
@@ -1176,7 +1286,17 @@ namespace display_device {
       if (!current.reason.empty()) {
         return false;
       }
+      const bool virtual_resolution_enabled = target.is_mttvdd && !DD_DATA.virtual_resolution_file.empty();
+      const auto track_resolution = [&](const EnumeratedDeviceList &devices) {
+        if (virtual_resolution_enabled) {
+          if (const auto resolution = active_resolution(devices, target.device_id)) {
+            DD_DATA.virtual_resolution = virtual_resolution_observation_t {target.device_id, *resolution};
+            claim->remember_resolution = true;
+          }
+        }
+      };
       if (mode == stream_mode_e::extend && !current.needs_activation) {
+        track_resolution(before);
         return true;
       }
       stop_token.requestStop();
@@ -1188,19 +1308,38 @@ namespace display_device {
       if (settings_iface.applySettings(config) != SettingsManagerInterface::ApplyResult::Ok) {
         return false;
       }
-      const auto devices = settings_iface.enumAvailableDevices();
+      auto devices = settings_iface.enumAvailableDevices();
+      if (virtual_resolution_enabled) {
+        auto preferred = active_resolution(before, target.device_id);
+        if (!preferred) {
+          preferred = load_virtual_resolution(DD_DATA.virtual_resolution_file, target.device_id);
+        }
+        if (preferred && preferred != active_resolution(devices, target.device_id)) {
+          // Prepare and persist the temporary layout before attempting the optional mode change.
+          config.m_resolution = preferred;
+          if (settings_iface.applySettings(config) != SettingsManagerInterface::ApplyResult::Ok) {
+            BOOST_LOG(warning) << "Virtual desktop resolution is unavailable. Continuing with the Windows-selected mode.";
+          }
+          devices = settings_iface.enumAvailableDevices();
+        }
+      }
       if (mode == stream_mode_e::extend) {
         const auto prepared = select_stream_display(mode, devices, target.device_id);
-        return prepared.reason.empty() && !prepared.needs_activation && std::ranges::all_of(before, [&](const auto &original) {
+        if (!prepared.reason.empty() || prepared.needs_activation || !std::ranges::all_of(before, [&](const auto &original) {
           if (!original.m_info) {
             return true;
           }
           const auto existing = std::ranges::find(devices, original.m_device_id, &EnumeratedDevice::m_device_id);
           return existing != devices.end() && existing->m_info == original.m_info;
-        });
+        })) {
+          return false;
+        }
+      } else if (std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) != 1 ||
+                 !std::ranges::any_of(devices, [&](const auto &device) { return device.m_info && device.m_device_id == target.device_id; })) {
+        return false;
       }
-      return std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) == 1 &&
-             std::ranges::any_of(devices, [&](const auto &device) { return device.m_info && device.m_device_id == target.device_id; });
+      track_resolution(devices);
+      return true;
     });
     if (!applied) {
       return {};
@@ -1290,10 +1429,11 @@ namespace display_device {
     return std::make_shared<watched_settings_persistence_t>(std::make_shared<memory_settings_persistence_t>());
   }
 
-  void test_install_settings_manager(std::unique_ptr<SettingsManagerInterface> manager, const std::shared_ptr<SettingsPersistenceInterface> &persistence) {
+  void test_install_settings_manager(std::unique_ptr<SettingsManagerInterface> manager, const std::shared_ptr<SettingsPersistenceInterface> &persistence, const std::filesystem::path &resolution_file) {
     std::lock_guard lock {DD_DATA.mutex};
     DD_DATA.sm_instance.reset();
     DD_DATA.persistence_watch = std::dynamic_pointer_cast<watched_settings_persistence_t>(persistence);
+    DD_DATA.virtual_resolution_file = resolution_file;
     if (!manager || !DD_DATA.persistence_watch) {
       return;
     }
@@ -1318,6 +1458,8 @@ namespace display_device {
     }
     DD_DATA.sm_instance.reset();
     DD_DATA.persistence_watch.reset();
+    DD_DATA.virtual_resolution_file.clear();
+    DD_DATA.virtual_resolution.reset();
     DD_DATA.test_retry_interval.reset();
   }
 #endif
