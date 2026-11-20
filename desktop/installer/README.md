@@ -1,7 +1,8 @@
 # SideLantern Windows installer
 
 The installer stages an AMD64 Electron distribution and a Sunshine engine into
-`%ProgramFiles%\SideLantern`. Use a Windows build of this fork for the release
+a new directory chosen during Setup. The default is `%ProgramFiles%\SideLantern`.
+Use a Windows build of this fork for the release
 candidate. A copy of upstream Sunshine is useful for verifying the package
 layout and lacks the fork's live session and display endpoints.
 The Electron interface uses the engine's local management API. The installer
@@ -13,15 +14,19 @@ Build on Windows x64 with the .NET Framework compiler available. Supply the
 portable Electron version pinned in [package.json](../package.json), the
 engine installation staging directory containing `sunshine.exe` and
 `assets\apps.json`, and the NSIS compiler path. By default the script builds
-the service from [desktop/native/service](../native/service).
+the service from [desktop/native/service](../native/service). Supply
+[rcedit 2.0.0](https://github.com/electron/rcedit/releases/tag/v2.0.0) to embed the SideLantern icon in the Electron executable.
 
 ```powershell
 .\desktop\installer\build.ps1 `
     -ElectronDirectory E:\tools\electron-win32-x64 `
     -EngineDirectory E:\build\sunshine-stage `
     -Makensis E:\tools\nsis\makensis.exe `
+    -ResourceEditor E:\tools\rcedit-x64.exe `
     -OutputDirectory E:\build\side-lantern `
-    -ViGEmBusInstaller E:\tools\ViGEmBus_1.22.0_x64_x86_arm64.exe
+    -ViGEmBusInstaller E:\tools\ViGEmBus_1.22.0_x64_x86_arm64.exe `
+    -VirtualDisplayArchive E:\tools\VirtualDisplayDriver-x86.Driver.Only.zip `
+    -VirtualDisplayLicense E:\tools\MttVDD-25.7.23-LICENSE
 ```
 
 `-ServiceExecutable` can supply a prebuilt AMD64 service. `-KeepStaging`
@@ -29,10 +34,18 @@ keeps the extracted staging tree for package inspection.
 `-WithoutViGEmBus` produces a gamepad-free packaging test. The default
 installer option installs the verified official ViGEmBus 1.22.0 installer if
 the driver is absent. Compatible installed ViGEmBus 1.17 or later is reused.
-An existing driver of unknown or incompatible version is left in place for
-manual troubleshooting.
+Setup detects the driver before displaying the component list. Only a missing
+driver is selected by default. A compatible copy is marked for reuse. An
+existing driver of unknown or incompatible version is left in place.
 [ViGEmBus release](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0) ·
 [Published hash and installer switches](https://github.com/microsoft/winget-pkgs/blob/master/manifests/v/ViGEm/ViGEmBus/1.22.0/ViGEm.ViGEmBus.installer.yaml)
+
+Pass the official `VirtualDisplayDriver-x86.Driver.Only.zip` archive and the
+license from **25.7.23** to include the optional AMD64 MttVDD component. The
+builder verifies both digests and the catalog signature. The component is
+unchecked by default. Setup reuses the existing display adapter when found.
+[MttVDD release](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23) ·
+[Driver license](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/LICENSE)
 
 ## Behavior and verification
 
@@ -40,6 +53,10 @@ manual troubleshooting.
   demand-start `SideLanternService` and grants that account service start and
   status access. Setup leaves the service stopped, so SideLantern can start it
   under its own lifetime management at first launch.
+- Choose a new folder on a fixed NTFS drive. Setup checks the parent folders for
+  ownership, permissions and redirection because the service runs as LocalSystem.
+  Program Files is the default protected location. A different drive is accepted
+  if its folder chain also passes these checks.
 - Setup adds SideLantern-only inbound rules on the private network profile for
   the local subnet. The Windows management endpoint is excluded. The existing
   `SunshineService`, its firewall rules and its files are outside Setup's
@@ -49,13 +66,13 @@ manual troubleshooting.
   through Windows Apps, and install the new version. Uninstall checks the
   service and firewall ownership, removes only staged program paths and keeps
   the per-user profile and shared drivers.
-- The package includes the read-only MttVDD probe. It can identify an existing
-  Windows-attached extended display and expose its actual modes. Use
-  `-VirtualDisplayDirectory` and `-SignTool` to validate an optional driver
-  candidate's catalog and exact files without packaging it. A future
-  app-owned virtual display needs a distinct install/control boundary before
-  Setup can safely add and remove a display.
-  [MttVDD control protocol](https://github.com/VirtualDrivers/Virtual-Driver-Control/tree/main/VirtualDriverControl)
+- The virtual display component registers a Windows virtual monitor adapter.
+  The probe identifies it once Windows provides an independent extended screen.
+  A mirrored screen shares the primary desktop. An installed driver with no
+  monitor available may require enabling a screen in the driver control panel.
+  Windows owns this layout and preserves the driver after SideLantern uninstall.
+- Inspect a different MttVDD candidate without bundling it by passing
+  `-VirtualDisplayDirectory` and `-SignTool`.
 - Build the candidate and inspect the staged programs and media assets.
   Installer compilation alone verifies the payload layout. Perform
   install, default component selection, standard-user start/stop, uninstall

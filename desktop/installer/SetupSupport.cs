@@ -21,7 +21,7 @@ internal static class SetupSupport
     private const string UdpRule = "SideLantern-Host-In-UDP";
     private const string ViGemSha256 = "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a";
 
-    private static readonly string InstallPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "SideLantern");
+    private static readonly string InstallPath = Path.GetDirectoryName(Path.GetDirectoryName(typeof(SetupSupport).Assembly.Location));
     private static readonly string AppPath = Path.Combine(InstallPath, "SideLantern.exe");
     private static readonly string ServicePath = Path.Combine(InstallPath, "resources", "SideLanternService.exe");
     private static readonly string EnginePath = Path.Combine(InstallPath, "resources", "engine", "sunshine.exe");
@@ -116,6 +116,7 @@ internal static class SetupSupport
     {
         if (!String.Equals(Path.GetFullPath(typeof(SetupSupport).Assembly.Location), SetupPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Unexpected path for the SideLantern Setup helper.");
+        ProtectedInstallPath.Verify(InstallPath);
         RequirePath(InstallPath);
         RequirePath(Path.Combine(InstallPath, "resources"));
         if (requirePayload)
@@ -184,6 +185,7 @@ internal static class SetupSupport
                 createdMarker = true;
                 marker.SetValue("SetupIdentifier", SetupIdentifier);
                 marker.SetValue("OwnerSid", owner);
+                marker.SetValue("InstallLocation", InstallPath);
             }
             Sc("create", ServiceName, "binPath=", ServiceCommand(owner), "start=", "demand",
                 "obj=", "LocalSystem", "DisplayName=", "SideLantern Streaming Service");
@@ -234,7 +236,8 @@ internal static class SetupSupport
         string owner;
         using (var marker = Registry.LocalMachine.OpenSubKey(SetupKey))
         {
-            if (marker == null || !String.Equals(marker.GetValue("SetupIdentifier") as string, SetupIdentifier, StringComparison.Ordinal))
+            if (marker == null || !String.Equals(marker.GetValue("SetupIdentifier") as string, SetupIdentifier, StringComparison.Ordinal) ||
+                !String.Equals(marker.GetValue("InstallLocation") as string, InstallPath, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("SideLantern setup registration could not be verified.");
             owner = marker.GetValue("OwnerSid") as string;
         }
@@ -261,9 +264,8 @@ internal static class SetupSupport
         Registry.LocalMachine.DeleteSubKey(SetupKey, false);
     }
 
-    private static int InstallViGemBus()
+    private static int ViGemBusStatus()
     {
-        VerifyPackage(true);
         string driver = Path.Combine(Environment.SystemDirectory, "drivers", "ViGEmBus.sys");
         using (var existing = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus"))
         {
@@ -278,28 +280,57 @@ internal static class SetupSupport
                 return 21; // No unattended replacement of an existing shared driver.
             }
         }
-        RequirePath(ViGemInstaller);
-        using (var file = File.OpenRead(ViGemInstaller))
-        using (var sha = SHA256.Create())
-        {
-            string digest = BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "");
-            if (!String.Equals(digest, ViGemSha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("The bundled ViGEmBus installer did not pass verification.");
-        }
+        return 10; // The service and driver file are both absent.
+    }
+
+    private static int InstallViGemBus()
+    {
+        VerifyPackage(true);
+        int status = ViGemBusStatus();
+        if (status != 10) return status;
+        VerifyDigest(ViGemInstaller, ViGemSha256);
         // ViGEmBus 1.22.0 deployment switches published in its Windows Package Manager manifest.
         return Run(ViGemInstaller, 150000, "/exenoui", "/qn", "/norestart");
     }
 
+    private static int InstallVdd()
+    {
+        VerifyPackage(true);
+        var package = Path.Combine(InstallPath, "resources", "vdd-driver");
+        RequirePath(package);
+        VerifyDigest(Path.Combine(package, "MttVDD.inf"), "550D211FE481E74DFE3F9D724ED78BE48B3A9113405965D683D9373E8D672F5D");
+        VerifyDigest(Path.Combine(package, "MttVDD.dll"), "C9CA837F57A98FBD43BC416A7F535A95843626E7759EAF85CF0CD7CE334DBB05");
+        VerifyDigest(Path.Combine(package, "MttVDD.cat"), "08A0093FC9B2E32B287A6F8A77CA4DE0A31830D29FC33D2B13A918DC859468F6");
+        return InstallVirtualDisplay.Install(package);
+    }
+
+    private static void VerifyDigest(string path, string expected)
+    {
+        RequirePath(path);
+        using (var file = File.OpenRead(path))
+        using (var sha = SHA256.Create())
+        {
+            string digest = BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "");
+            if (!String.Equals(digest, expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(Path.GetFileName(path) + " did not pass verification.");
+        }
+    }
+
     private static int Main(string[] args)
     {
-        if (args.Length != 1) return 2;
         try
         {
+            if (args.Length == 2 && args[0] == "validate-dir") { ProtectedInstallPath.ValidateNew(args[1]); return 0; }
+            if (args.Length == 2 && args[0] == "create-dir") { ProtectedInstallPath.Create(args[1]); return 0; }
+            if (args.Length != 1) return 2;
             switch (args[0])
             {
                 case "install": Install(); return 0;
                 case "uninstall": Uninstall(); return 0;
+                case "vigem-status": return ViGemBusStatus();
                 case "vigem": return InstallViGemBus();
+                case "vdd-status": return InstallVirtualDisplay.Status();
+                case "vdd": return InstallVdd();
                 default: return 2;
             }
         }

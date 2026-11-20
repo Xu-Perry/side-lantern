@@ -1497,11 +1497,12 @@ namespace nvhttp {
     /** @brief Resolve a display mode available on this host.
      * @param mode Requested mode.
      * @param devices Display layout snapshot.
+     * @param virtual_targets Verified virtual displays eligible for automatic selection.
      * @return Target identity or a stable rejection reason.
      */
-    display_device::stream_display_t mode_display([[maybe_unused]] stream_mode_e mode, [[maybe_unused]] const display_device::EnumeratedDeviceList &devices) {
+    display_device::stream_display_t mode_display([[maybe_unused]] stream_mode_e mode, [[maybe_unused]] const display_device::EnumeratedDeviceList &devices, [[maybe_unused]] const display_device::StringSet &virtual_targets) {
 #ifdef _WIN32
-      return display_device::select_stream_display(mode, devices, config::video.output_name);
+      return display_device::select_stream_display(mode, devices, config::video.output_name, virtual_targets);
 #else
       return {{}, {}, "unsupported_platform"};
 #endif
@@ -1543,7 +1544,8 @@ namespace nvhttp {
         reject_stream_mode(tree, 409, "capture_busy");
         return std::nullopt;
       }
-      auto display = mode_display(requested->second, display_device::enumerate_devices());
+      const auto virtual_targets = requested->second == stream_mode_e::primary ? display_device::StringSet {} : display_device::enumerate_mttvdd_targets();
+      auto display = mode_display(requested->second, display_device::enumerate_devices(), virtual_targets);
       if (!display.reason.empty()) {
         reject_stream_mode(tree, display.reason == "unsupported_platform" ? 501 : 503, display.reason);
         return std::nullopt;
@@ -1577,12 +1579,13 @@ namespace nvhttp {
     void stream_mode_list(const resp_https_t &response) {
       const auto devices = display_device::enumerate_devices();
       const auto busy = display_device::stream_display_claimed() || rtsp_stream::capture_busy();
+      const auto virtual_targets = busy ? display_device::StringSet {} : display_device::enumerate_mttvdd_targets();
       pt::ptree tree;
       auto &root = tree.add_child("root", pt::ptree {});
       root.put("<xmlattr>.status_code", 200);
       root.put("<xmlattr>.version", 1);
       for (const auto &[id, mode] : stream_modes) {
-        const auto target = mode_display(mode, devices);
+        const auto target = mode_display(mode, devices, virtual_targets);
         const auto reason = busy ? "capture_busy"sv : target.reason;
         auto &item = root.add_child("mode", pt::ptree {});
         item.put("<xmlattr>.id", std::string {id});

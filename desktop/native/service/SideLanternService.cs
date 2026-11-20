@@ -19,8 +19,7 @@ namespace SideLantern.HostService
     {
         internal const string Name = "SideLanternService";
         private const uint InvalidEngineExit = 1067;
-        private static readonly string InstallDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "SideLantern");
+        private static readonly string InstallDirectory = Path.GetDirectoryName(Path.GetDirectoryName(typeof(SideLanternService).Assembly.Location));
         private static readonly string ServiceBinary = Path.Combine(InstallDirectory, "resources", Name + ".exe");
         private static readonly string DesktopBinary = Path.Combine(InstallDirectory, "SideLantern.exe");
         private static readonly string EngineBinary = Path.Combine(InstallDirectory, "resources", "engine", "sunshine.exe");
@@ -65,6 +64,7 @@ namespace SideLantern.HostService
                 string ownPath;
                 using (var current = Process.GetCurrentProcess())
                     ownPath = current.MainModule.FileName;
+                ProtectedInstallPath.Verify(InstallDirectory);
                 if (!String.Equals(ServiceBinary, ownPath, StringComparison.OrdinalIgnoreCase) ||
                     !ProtectedFilesExist(ServiceBinary) || !ProtectedFilesExist(DesktopBinary) || !ProtectedFilesExist(EngineBinary))
                     return 5;

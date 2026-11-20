@@ -207,6 +207,7 @@ function registerIpc() {
 async function createWindow() {
   window = new BrowserWindow({
     width: 1030, height: 775, minWidth: 650, minHeight: 540, show: false,
+    icon: path.join(__dirname, 'assets', 'app.ico'),
     title: 'SideLantern', autoHideMenuBar: true, backgroundColor: nativeTheme.shouldUseDarkColors ? '#1b211e' : '#f5f7f4',
     webPreferences: {preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false}
   });

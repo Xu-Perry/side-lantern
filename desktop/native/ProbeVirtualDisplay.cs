@@ -111,10 +111,10 @@ internal static class ProbeVirtualDisplay
         return false;
     }
 
-    private static bool DriverIsPresent()
+    internal static bool DriverIsPresent(uint flags)
     {
         var displayClass = new Guid("4d36e968-e325-11ce-bfc1-08002be10318");
-        IntPtr set = SetupDiGetClassDevs(ref displayClass, null, IntPtr.Zero, Present);
+        IntPtr set = SetupDiGetClassDevs(ref displayClass, null, IntPtr.Zero, flags);
         if (set == InvalidHandle)
             throw new Win32Exception(Marshal.GetLastWin32Error());
         try
@@ -187,7 +187,7 @@ internal static class ProbeVirtualDisplay
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         try
         {
-            bool detected = DriverIsPresent();
+            bool detected = DriverIsPresent(Present);
             Console.WriteLine("present\t{0}", detected ? "1" : "0");
             if (!detected)
                 return 0;

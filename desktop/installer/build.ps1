@@ -2,10 +2,13 @@ param(
     [Parameter(Mandatory)][string] $ElectronDirectory,
     [Parameter(Mandatory)][string] $EngineDirectory,
     [Parameter(Mandatory)][string] $Makensis,
+    [Parameter(Mandatory)][string] $ResourceEditor,
     [Parameter(Mandatory)][string] $OutputDirectory,
     [string] $ServiceExecutable,
     [string] $ViGEmBusInstaller,
     [switch] $WithoutViGEmBus,
+    [string] $VirtualDisplayArchive,
+    [string] $VirtualDisplayLicense,
     [string] $VirtualDisplayDirectory,
     [string] $SignTool,
     [switch] $KeepStaging
@@ -20,6 +23,8 @@ $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.
 $ElectronDirectory = (Resolve-Path -LiteralPath $ElectronDirectory).Path
 $EngineDirectory = (Resolve-Path -LiteralPath $EngineDirectory).Path
 $Makensis = (Resolve-Path -LiteralPath $Makensis).Path
+$ResourceEditor = (Resolve-Path -LiteralPath $ResourceEditor).Path
+$appIcon = Join-Path $desktop 'assets\app.ico'
 
 function Assert-X64Executable([string] $Path) {
     $file = [System.IO.File]::OpenRead($Path)
@@ -78,6 +83,15 @@ if ($VirtualDisplayDirectory) {
     if (-not $SignTool) { throw 'Supply SignTool to verify the optional MttVDD package against its catalog.' }
     Assert-TrustedDriverPackage (Resolve-Path -LiteralPath $VirtualDisplayDirectory).Path (Resolve-Path -LiteralPath $SignTool).Path
 }
+if ([bool]$VirtualDisplayArchive -ne [bool]$VirtualDisplayLicense) { throw 'Supply both the MttVDD 25.7.23 archive and its license.' }
+if ($VirtualDisplayArchive) {
+    $VirtualDisplayArchive = (Resolve-Path -LiteralPath $VirtualDisplayArchive).Path
+    $VirtualDisplayLicense = (Resolve-Path -LiteralPath $VirtualDisplayLicense).Path
+    if ((Get-FileHash -LiteralPath $VirtualDisplayArchive -Algorithm SHA256).Hash -ne 'E24210692B442B39AF763536330CE78B423F19342B7A7792C26DE3944E418B3A' -or
+        (Get-FileHash -LiteralPath $VirtualDisplayLicense -Algorithm SHA256).Hash -ne 'C2285C867DDC9B88F43B4F8FA2C77A9EEC66207166C1217B37353A2CCD62AC03') {
+        throw 'The virtual display archive and license must match the official 25.7.23 release.'
+    }
+}
 
 $electron = Join-Path $ElectronDirectory 'electron.exe'
 $engine = Join-Path $EngineDirectory 'sunshine.exe'
@@ -99,10 +113,21 @@ $engineStage = Join-Path $resources 'engine'
 New-Item -ItemType Directory -Path $app,$engineStage | Out-Null
 
 try {
+    if ($VirtualDisplayArchive) {
+        $driverStage = Join-Path $stageDirectory 'vdd'
+        Expand-Archive -LiteralPath $VirtualDisplayArchive -DestinationPath $driverStage
+        $driverPackage = Join-Path $driverStage 'VirtualDisplayDriver'
+        $catalog = Join-Path $driverPackage 'MttVDD.cat'
+        if ((Get-AuthenticodeSignature -LiteralPath $catalog).Status -ne 'Valid') { throw 'The MttVDD catalog signature is not trusted.' }
+        Copy-Item -LiteralPath $VirtualDisplayLicense -Destination (Join-Path $driverPackage 'LICENSE.txt')
+    }
     foreach ($item in Get-ChildItem -LiteralPath $ElectronDirectory -Force) {
         if ($item.Name -notin @('electron.exe', 'resources')) { Copy-BundleItem $item $payload }
     }
-    Copy-Item -LiteralPath $electron -Destination (Join-Path $payload 'SideLantern.exe')
+    $appExecutable = Join-Path $payload 'SideLantern.exe'
+    Copy-Item -LiteralPath $electron -Destination $appExecutable
+    & $ResourceEditor $appExecutable --set-icon $appIcon
+    if ($LASTEXITCODE -ne 0) { throw 'SideLantern.exe could not be branded with the application icon.' }
     $electronResources = Join-Path $ElectronDirectory 'resources'
     if (Test-Path -LiteralPath $electronResources -PathType Container) {
         foreach ($item in Get-ChildItem -LiteralPath $electronResources -Force) {
@@ -138,7 +163,9 @@ try {
     }
     & $compiler /nologo /platform:x64 /target:exe "/out:$(Join-Path $resources 'ProbeVirtualDisplay.exe')" (Join-Path $desktop 'native\ProbeVirtualDisplay.cs')
     if ($LASTEXITCODE -ne 0) { throw 'ProbeVirtualDisplay could not be built.' }
-    & $compiler /nologo /platform:x64 /target:exe /r:System.ServiceProcess.dll /r:Microsoft.CSharp.dll "/out:$(Join-Path $resources 'SetupSupport.exe')" (Join-Path $PSScriptRoot 'SetupSupport.cs')
+    & $compiler /nologo /platform:x64 /target:exe /main:SetupSupport /r:System.ServiceProcess.dll /r:Microsoft.CSharp.dll `
+        "/out:$(Join-Path $resources 'SetupSupport.exe')" (Join-Path $PSScriptRoot 'SetupSupport.cs') (Join-Path $PSScriptRoot 'InstallVirtualDisplay.cs') `
+        (Join-Path $desktop 'native\ProtectedInstallPath.cs') (Join-Path $desktop 'native\ProbeVirtualDisplay.cs')
     if ($LASTEXITCODE -ne 0) { throw 'SideLantern Setup helper could not be built.' }
 
     $cleanup = Join-Path $stageDirectory 'payload-cleanup.nsh'
@@ -157,8 +184,9 @@ try {
     $setup = Join-Path $output "SideLantern-$($package.version)-win-x64-setup.exe"
     $version = ($package.version -split '[-+]')[0] + '.0'
     $argsForNsis = @('/V3', "/DPRODUCT_VERSION=$($package.version)", "/DVERSION_NUMBER=$version",
-        "/DPAYLOAD=$payload", "/DPAYLOAD_CLEANUP=$cleanup", "/DSETUP_EXE=$setup")
+        "/DPAYLOAD=$payload", "/DPAYLOAD_CLEANUP=$cleanup", "/DSETUP_EXE=$setup", "/DAPP_ICON=$appIcon")
     if (-not $WithoutViGEmBus) { $argsForNsis += "/DVIGEM_SETUP=$ViGEmBusInstaller" }
+    if ($VirtualDisplayArchive) { $argsForNsis += "/DVDD_PACKAGE=$driverPackage" }
     & $Makensis @argsForNsis (Join-Path $PSScriptRoot 'SideLantern.nsi')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "NSIS setup could not be built (exit code $LASTEXITCODE)."

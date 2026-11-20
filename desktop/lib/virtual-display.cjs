@@ -118,7 +118,7 @@ function createVirtualDisplay({dataDirectory, probeExecutable, probe, getEngineO
       ...(singleOutput?.outputId ? {outputId: singleOutput.outputId} : {}),
       reason: outputs.length
         ? '已检测到共享虚拟显示器。请在 Windows 或驱动控制面板中启停和修改模式。'
-        : '已检测到共享虚拟显示驱动。请在 Windows 显示设置中将虚拟显示器设为扩展屏。'
+        : '驱动已安装。支持无线副屏的客户端连接时会尝试自动启用虚拟屏。如果驱动尚未提供虚拟屏，请在驱动控制面板中启用一个。'
     };
   }
 

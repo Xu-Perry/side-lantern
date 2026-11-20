@@ -156,7 +156,7 @@ namespace display_device {
   enum class stream_mode_e {
     primary,  ///< Capture the current primary display.
     secondary,  ///< Capture the configured extended display with the primary display disabled.
-    extend,  ///< Capture the configured extended display without modifying the layout.
+    extend,  ///< Capture a separate display, activating it for the session if necessary.
   };
 
   /** @brief An explicit capture target selected for a SideLantern request. */
@@ -164,17 +164,24 @@ namespace display_device {
     std::string device_id;  ///< Stable display ID valid for the lifetime of the request.
     std::string display_name;  ///< Current platform capture name used for encoder probing.
     std::string_view reason;  ///< Empty for a valid target, otherwise the protocol failure reason.
+    bool needs_activation {false};  ///< The target is available but not yet active in Windows.
   };
 
-  /** @brief Select a capture target from a snapshot of the active layout.
+  /** @brief Find the IDs of available Windows monitor targets backed by the bundled MttVDD driver.
+   * @return Stable display IDs for active and inactive MttVDD outputs.
+   */
+  [[nodiscard]] StringSet enumerate_mttvdd_targets();
+
+  /** @brief Select a capture target from a snapshot of available displays.
    * @param mode Requested display mode.
    * @param devices Enumerated display topology.
-   * @param configured_output Host-selected extended display ID.
+   * @param configured_output Host-selected display ID.
+   * @param virtual_targets Verified MttVDD outputs eligible for automatic selection.
    * @return Valid display identity or the reason it could not be selected.
    */
-  [[nodiscard]] stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output);
+  [[nodiscard]] stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output, const StringSet &virtual_targets = {});
 
-  /** @brief Claim the capture source and temporarily disable the primary display when requested.
+  /** @brief Claim the capture source and apply any temporary display changes required by the mode.
    * @param mode Requested display mode.
    * @param target Selected display identity.
    * @return Lifetime guard, or null when the layout could not be prepared.

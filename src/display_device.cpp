@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
@@ -34,6 +35,10 @@
   #include <display_device/windows/settings_manager.h>
   #include <display_device/windows/win_api_layer.h>
   #include <display_device/windows/win_display_device.h>
+  #include <cfgmgr32.h>
+  #include <setupapi.h>
+
+  #include "platform/windows/utf_utils.h"
 #endif
 
 #ifdef __APPLE__
@@ -1031,7 +1036,66 @@ namespace display_device {
     });
   }
 
-  stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output) {
+  StringSet enumerate_mttvdd_targets() {
+    StringSet targets;
+#ifdef _WIN32
+    const WinApiLayer api;
+    const auto paths = api.queryDisplayConfig(QueryType::All);
+    const auto interfaces = SetupDiCreateDeviceInfoList(nullptr, nullptr);
+    if (interfaces == INVALID_HANDLE_VALUE) {
+      return targets;
+    }
+    const std::unique_ptr<void, decltype(&SetupDiDestroyDeviceInfoList)> cleanup {interfaces, SetupDiDestroyDeviceInfoList};
+    if (!paths) {
+      return targets;
+    }
+
+    for (const auto &path : paths->m_paths) {
+      if (!path.targetInfo.targetAvailable) {
+        continue;
+      }
+      const auto monitor_path = utf_utils::from_utf8(api.getMonitorDevicePath(path));
+      SP_DEVICE_INTERFACE_DATA monitor {.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA)};
+      if (monitor_path.empty() || !SetupDiOpenDeviceInterfaceW(interfaces, monitor_path.c_str(), 0, &monitor)) {
+        continue;
+      }
+
+      DWORD required_bytes {};
+      SP_DEVINFO_DATA device {.cbSize = sizeof(SP_DEVINFO_DATA)};
+      // SetupAPI can fill device info without copying the variable-length interface path.
+      SetupDiGetDeviceInterfaceDetailW(interfaces, &monitor, nullptr, 0, &required_bytes, &device);
+      DEVINST parent {};
+      if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || required_bytes == 0 || CM_Get_Parent(&parent, device.DevInst, 0) != CR_SUCCESS) {
+        continue;
+      }
+
+      ULONG type {};
+      std::array<wchar_t, 1024> hardware_ids {};
+      ULONG bytes = sizeof(hardware_ids);
+      if (CM_Get_DevNode_Registry_PropertyW(parent, CM_DRP_HARDWAREID, &type, hardware_ids.data(), &bytes, 0) != CR_SUCCESS ||
+          type != REG_MULTI_SZ || bytes < 2 * sizeof(wchar_t) || bytes > sizeof(hardware_ids) || bytes % sizeof(wchar_t) != 0 ||
+          hardware_ids[bytes / sizeof(wchar_t) - 1] != L'\0') {
+        continue;
+      }
+      for (std::wstring_view ids {hardware_ids.data(), bytes / sizeof(wchar_t)}; !ids.empty() && ids.front() != L'\0';) {
+        const auto length = ids.find(L'\0');
+        const auto same_id = [&](const wchar_t *expected) {
+          return CompareStringOrdinal(ids.data(), static_cast<int>(length), expected, -1, TRUE) == CSTR_EQUAL;
+        };
+        if (same_id(L"Root\\MttVDD") || same_id(L"MttVDD")) {
+          if (auto id = api.getDeviceId(path); !id.empty()) {
+            targets.insert(std::move(id));
+          }
+          break;
+        }
+        ids.remove_prefix(length + 1);
+      }
+    }
+#endif
+    return targets;
+  }
+
+  stream_display_t select_stream_display(stream_mode_e mode, const EnumeratedDeviceList &devices, std::string_view configured_output, const StringSet &virtual_targets) {
     const auto active = [](const auto &device) { return device.m_info && !device.m_device_id.empty() && !device.m_display_name.empty(); };
     const auto primary = std::ranges::find_if(devices, [&](const auto &device) { return active(device) && device.m_info->m_primary; });
     if (mode == stream_mode_e::primary) {
@@ -1041,18 +1105,33 @@ namespace display_device {
       return {primary->m_device_id, primary->m_display_name, {}};
     }
 
-    const auto target = std::ranges::find_if(devices, [&](const auto &device) {
-      return active(device) && !device.m_info->m_primary && device.m_device_id == configured_output;
-    });
-    if (primary == devices.end() || target == devices.end() || std::ranges::any_of(devices, [&](const auto &device) {
-          return &device != &*target && device.m_info && device.m_info->m_origin_point == target->m_info->m_origin_point;
-        })) {
+    if (primary == devices.end()) {
       return {.reason = "secondary_display_unavailable"};
     }
-    if (mode == stream_mode_e::secondary && std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) != 2) {
+
+    const auto eligible = [&](const auto &device) {
+      return !device.m_device_id.empty() && (!device.m_info || (active(device) && !device.m_info->m_primary));
+    };
+    auto target = std::ranges::find_if(devices, [&](const auto &device) {
+      return eligible(device) && device.m_device_id == configured_output;
+    });
+    if (target == devices.end()) {
+      const auto automatic = [&](const auto &device) { return eligible(device) && virtual_targets.contains(device.m_device_id); };
+      target = std::ranges::find_if(devices, automatic);
+      if (target != devices.end() && std::ranges::find_if(std::next(target), devices.end(), automatic) != devices.end()) {
+        return {.reason = "multiple_secondary_displays"};
+      }
+    }
+    if (target == devices.end() || (target->m_info && std::ranges::any_of(devices, [&](const auto &device) {
+          return &device != &*target && device.m_info && device.m_info->m_origin_point == target->m_info->m_origin_point;
+        }))) {
+      return {.reason = "secondary_display_unavailable"};
+    }
+    const auto needs_activation = !target->m_info;
+    if (mode == stream_mode_e::secondary && std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) != (needs_activation ? 1 : 2)) {
       return {.reason = "other_displays_active"};
     }
-    return {target->m_device_id, target->m_display_name, {}};
+    return {target->m_device_id, target->m_display_name, {}, needs_activation};
   }
 
   namespace {
@@ -1083,7 +1162,7 @@ namespace display_device {
       return {};
     }
     auto claim = std::make_shared<stream_display_claim_t>();
-    if (mode != stream_mode_e::secondary) {
+    if (mode == stream_mode_e::primary) {
       return claim;
     }
 
@@ -1092,18 +1171,34 @@ namespace display_device {
       return {};
     }
     const auto applied = DD_DATA.sm_instance->execute([&](auto &settings_iface, auto &stop_token) {
-      if (!select_stream_display(mode, settings_iface.enumAvailableDevices(), target.device_id).reason.empty()) {
+      const auto before = settings_iface.enumAvailableDevices();
+      const auto current = select_stream_display(mode, before, target.device_id);
+      if (!current.reason.empty()) {
         return false;
+      }
+      if (mode == stream_mode_e::extend && !current.needs_activation) {
+        return true;
       }
       stop_token.requestStop();
       claim->restore_layout = true;
       SingleDisplayConfiguration config;
       config.m_device_id = target.device_id;
-      config.m_device_prep = SingleDisplayConfiguration::DevicePreparation::EnsureOnlyDisplay;
+      using enum SingleDisplayConfiguration::DevicePreparation;
+      config.m_device_prep = mode == stream_mode_e::secondary ? EnsureOnlyDisplay : EnsureActive;
       if (settings_iface.applySettings(config) != SettingsManagerInterface::ApplyResult::Ok) {
         return false;
       }
       const auto devices = settings_iface.enumAvailableDevices();
+      if (mode == stream_mode_e::extend) {
+        const auto prepared = select_stream_display(mode, devices, target.device_id);
+        return prepared.reason.empty() && !prepared.needs_activation && std::ranges::all_of(before, [&](const auto &original) {
+          if (!original.m_info) {
+            return true;
+          }
+          const auto existing = std::ranges::find(devices, original.m_device_id, &EnumeratedDevice::m_device_id);
+          return existing != devices.end() && existing->m_info == original.m_info;
+        });
+      }
       return std::ranges::count_if(devices, [](const auto &device) { return device.m_info.has_value(); }) == 1 &&
              std::ranges::any_of(devices, [&](const auto &device) { return device.m_info && device.m_device_id == target.device_id; });
     });

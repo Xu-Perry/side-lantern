@@ -570,14 +570,19 @@ namespace {
     }
 
     [[nodiscard]] ApplyResult applySettings(const display_device::SingleDisplayConfiguration &config) override {
-      if (config.m_device_prep == device_prep_t::EnsureOnlyDisplay) {
+      using enum device_prep_t;
+      if (config.m_device_prep == EnsureOnlyDisplay || config.m_device_prep == EnsureActive) {
         std::lock_guard lock {mutex};
         saved_layout = devices;
         for (auto &device : devices) {
-          if (device.m_device_id != config.m_device_id) {
+          if (device.m_device_id == config.m_device_id) {
+            const auto only_display = config.m_device_prep == EnsureOnlyDisplay;
+            device.m_display_name = device.m_device_id;
+            device.m_info.emplace();
+            device.m_info->m_primary = only_display;
+            device.m_info->m_origin_point.m_x = only_display ? 0 : 1920;
+          } else if (config.m_device_prep == EnsureOnlyDisplay) {
             device.m_info.reset();
-          } else {
-            device.m_info->m_primary = true;
           }
         }
       }
@@ -719,6 +724,61 @@ TEST(DisplayStreamMode, DistinguishesPrimaryExtendedAndOnlyDisplayChoices) {
   EXPECT_EQ(display_device::select_stream_display(extend, devices, "virtual").reason, "secondary_display_unavailable");
   devices.clear();
   EXPECT_EQ(display_device::select_stream_display(primary, devices, "").reason, "primary_display_unavailable");
+}
+
+TEST(DisplayStreamMode, CanPrepareAConfiguredDisplayThatWindowsHasNotActivated) {
+  using enum display_device::stream_mode_e;
+  const display_device::EnumeratedDeviceList devices {active_display("main", true, 0), {.m_device_id = "virtual"}};
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "virtual").device_id, "virtual");
+  EXPECT_EQ(display_device::select_stream_display(secondary, devices, "virtual").device_id, "virtual");
+  EXPECT_TRUE(display_device::select_stream_display(extend, devices, "virtual").needs_activation);
+}
+
+TEST(DisplayStreamMode, AutomaticallySelectsOneVerifiedVirtualOutput) {
+  using enum display_device::stream_mode_e;
+  const display_device::EnumeratedDeviceList devices {active_display("main", true, 0), {.m_device_id = "mtt"}, {.m_device_id = "another"}};
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "", {"mtt"}).device_id, "mtt");
+  EXPECT_EQ(display_device::select_stream_display(secondary, devices, "main", {"mtt"}).device_id, "mtt");
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "", {"mtt", "another"}).reason, "multiple_secondary_displays");
+  EXPECT_EQ(display_device::select_stream_display(extend, devices, "mtt", {"mtt", "another"}).device_id, "mtt");
+}
+
+TEST(DisplayStreamMode, ExtendedModeActivatesVirtualDisplayAndRestoresOriginalLayout) {
+  using enum display_device::stream_mode_e;
+  [[maybe_unused]] const display_device_revert_guard_t guard;
+  const auto persistence = display_device::test_make_watched_persistence();
+  auto manager = std::make_unique<redock_settings_manager_t>(persistence);
+  const display_device::EnumeratedDeviceList devices {active_display("main", true, 0), {.m_device_id = "virtual"}, active_display("physical", false, -1920)};
+  manager->set_devices(devices);
+  manager->set_keep_pending(false);
+  display_device::test_install_settings_manager(std::move(manager), persistence);
+
+  const auto target = display_device::select_stream_display(extend, devices, "", {"virtual"});
+  auto claim = display_device::prepare_stream_display(extend, target);
+  ASSERT_TRUE(claim);
+  const auto extended = display_device::enumerate_devices();
+  ASSERT_EQ(extended.size(), devices.size());
+  EXPECT_EQ(extended.front(), devices.front());
+  EXPECT_EQ(extended.back(), devices.back());
+  EXPECT_TRUE(extended[1].m_info.has_value());
+  claim.reset();
+  EXPECT_EQ(display_device::enumerate_devices(), devices);
+}
+
+TEST(DisplayStreamMode, FailedExtensionRestoresLayoutAndReleasesCapture) {
+  using enum display_device::stream_mode_e;
+  [[maybe_unused]] const display_device_revert_guard_t guard;
+  const auto persistence = display_device::test_make_watched_persistence();
+  auto manager = std::make_unique<redock_settings_manager_t>(persistence);
+  const display_device::EnumeratedDeviceList devices {active_display("main", true, 0), {.m_device_id = "virtual"}, active_display("physical", false, 1920)};
+  manager->set_devices(devices);
+  manager->set_keep_pending(false);
+  display_device::test_install_settings_manager(std::move(manager), persistence);
+
+  const auto target = display_device::select_stream_display(extend, devices, "", {"virtual"});
+  EXPECT_FALSE(display_device::prepare_stream_display(extend, target));
+  EXPECT_FALSE(display_device::stream_display_claimed());
+  EXPECT_EQ(display_device::enumerate_devices(), devices);
 }
 
 TEST(DisplayStreamMode, OnlyDisplayRestoresLayoutWhenLastClaimIsReleased) {

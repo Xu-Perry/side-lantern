@@ -75,7 +75,7 @@
     displayProbeError: ['Could not read the Windows virtual display status.', '无法读取 Windows 虚拟显示器状态。'],
     displayDriverMissing: ['The MttVDD virtual display driver was not found.', '未检测到 MttVDD 虚拟显示驱动。'],
     sharedDisplayExtended: ['A shared virtual display was detected. Use Windows Settings or the driver control panel to turn it on or off and change its mode.', '已检测到共享虚拟显示器。请在 Windows 或驱动控制面板中启停和修改模式。'],
-    sharedDisplayDriverDetected: ['A shared virtual display driver was detected. Set the virtual display to Extend in Windows display settings.', '已检测到共享虚拟显示驱动。请在 Windows 显示设置中将虚拟显示器设为扩展屏。'],
+    sharedDisplayDriverDetected: ['The driver is installed. Compatible clients try to activate the virtual screen when you connect. If the driver has no virtual screen, enable one in its control panel.', '驱动已安装。支持无线副屏的客户端连接时会尝试自动启用虚拟屏。如果驱动尚未提供虚拟屏，请在驱动控制面板中启用一个。'],
     theme: ['Theme', '主题'],
     language: ['Language', '语言'],
     appliesImmediately: ['Changes take effect immediately.', '切换立即生效。'],
