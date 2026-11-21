@@ -38,6 +38,7 @@ test('stages a separate executable, config and working credentials without touch
   const conf = await fs.readFile(profile.config, 'utf8');
   const auth = JSON.parse(await fs.readFile(profile.credentials, 'utf8'));
   assert.match(conf, /^port = 48989$/m);
+  assert.doesNotMatch(conf, /^sunshine_name\s*=/m);
   assert.match(conf, /^origin_web_ui_allowed = pc$/m);
   assert.match(conf, /^upnp = disabled$/m);
   assert.equal(auth.username, profile.username);
@@ -50,7 +51,29 @@ test('stages a separate executable, config and working credentials without touch
   const installed = await prepareProfile({...inputs, target: path.join(temp, 'installed'), port: 47989, installed: true});
   assert.equal(installed.executable, path.join(source, 'sunshine.exe'));
   await assert.rejects(fs.access(path.join(installed.root, 'sunshine.exe')), {code: 'ENOENT'});
-  assert.match(await fs.readFile(installed.config, 'utf8'), /^port = 47989$/m);
+  const installedConf = await fs.readFile(installed.config, 'utf8');
+  assert.match(installedConf, /^port = 47989$/m);
+  assert.doesNotMatch(installedConf, /^sunshine_name\s*=/m);
+});
+
+test('removes only the legacy default hostname from existing profiles', async t => {
+  const temp = await fs.mkdtemp(path.join(tmpdir(), 'side-lantern-test-'));
+  t.after(() => fs.rm(temp, {recursive: true, force: true}));
+  const source = path.join(temp, 'source');
+  const target = path.join(temp, 'installed');
+  await fs.mkdir(source);
+  await fs.writeFile(path.join(source, 'sunshine.exe'), 'engine');
+  const inputs = {source, target, port: 47989, storage, installed: true};
+  const {config} = await prepareProfile(inputs);
+  const existingSettings = '# 用户设置\r\nport = 47989\r\nmax_bitrate = 10000\r\n';
+  await fs.writeFile(config, 'sunshine_name = SideLantern\r\n' + existingSettings);
+  await prepareProfile(inputs);
+  assert.equal(await fs.readFile(config, 'utf8'), existingSettings);
+
+  const customized = existingSettings + 'sunshine_name = 客厅电脑';
+  await fs.writeFile(config, customized);
+  await prepareProfile(inputs);
+  assert.equal(await fs.readFile(config, 'utf8'), customized);
 });
 
 test('worker stops its own engine when the desktop IPC owner disappears', {timeout: 6000}, async t => {

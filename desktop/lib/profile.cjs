@@ -24,6 +24,21 @@ async function createIfMissing(file, contents) {
   }
 }
 
+async function migrateDefaultHostname(config) {
+  const current = await fs.readFile(config, 'utf8');
+  const updated = current.replace(/^sunshine_name = SideLantern(?:\r?\n|$)/gm, '');
+  if (updated === current) return;
+
+  // Keep the engine's hostname fallback and preserve the rest of the profile.
+  const temporaryFile = `${config}.${randomBytes(8).toString('hex')}.tmp`;
+  await fs.writeFile(temporaryFile, updated, {flag: 'wx', mode: 0o600});
+  try {
+    await fs.rename(temporaryFile, config);
+  } finally {
+    await fs.rm(temporaryFile, {force: true});
+  }
+}
+
 async function prepareProfile({source, target, port, storage, installed = false}) {
   if (installed ? port !== 47989 : !Number.isInteger(port) || port < 1029 || port > 65514 || Math.abs(port - 47989) < 32) {
     throw new Error('测试实例需要一组与 Sunshine 默认端口独立的端口。');
@@ -81,7 +96,6 @@ async function prepareProfile({source, target, port, storage, installed = false}
   const hash = createHash('sha256').update(password + salt).digest().reverse().toString('hex').toUpperCase();
   await createIfMissing(credentials, JSON.stringify({username, salt, password: hash}));
   await createIfMissing(config, [
-    'sunshine_name = SideLantern',
     `port = ${port}`,
     'origin_web_ui_allowed = pc',
     'credentials_file = sl-management.json',
@@ -90,7 +104,8 @@ async function prepareProfile({source, target, port, storage, installed = false}
     'upnp = disabled',
     ''
   ].join('\n'));
+  await migrateDefaultHostname(config);
   return {root, executable, config, credentials, certificate, logDirectory, consoleLog, terminationHelper, username, password};
 }
 
-module.exports = {prepareProfile};
+module.exports = {prepareProfile, migrateDefaultHostname};
