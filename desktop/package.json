@@ -1,7 +1,7 @@
 {
   "name": "side-lantern",
   "productName": "SideLantern",
-  "version": "0.1.0-dev.10",
+  "version": "0.1.0-dev.11",
   "private": true,
   "main": "main.cjs",
   "scripts": {
