@@ -27,6 +27,7 @@
 #include <src/config.h>
 #include <src/manual_video_settings.h>
 #include <src/nvhttp.h>
+#include <src/platform/common.h>
 #include <src/rtsp.h>
 
 namespace fs = std::filesystem;
@@ -210,6 +211,7 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   };
   const auto modes = request_mode("/sidelantern/v1/stream-modes").second;
   EXPECT_NE(modes.find("version=\"1\""), std::string::npos);
+  EXPECT_NE(modes.find("join_current=\"0\""), std::string::npos);
   for (const auto *id : {"primary", "secondary", "extend"}) {
     EXPECT_NE(modes.find(std::string {"id=\""} + id + '"'), std::string::npos);
   }
@@ -219,14 +221,36 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
     EXPECT_NE(rejected.find("unknown_mode"), std::string::npos);
   }
   {
-    auto active = rtsp_stream::test_support::insert_session(first_id, "Main display client", true);
+    auto layout = std::make_shared<platf::deinit_t>();
+    const std::weak_ptr<platf::deinit_t> lifetime = layout;
+    auto active = rtsp_stream::test_support::insert_session(first_id, "Virtual display client", true, {}, {"virtual", std::move(layout)});
     auto clear = util::fail_guard([&] { rtsp_stream::test_support::remove_session(active); });
-    const auto busy = request_mode("/launch?sidelantern_mode=extend").second;
-    EXPECT_NE(busy.find("status_code=\"409\""), std::string::npos);
-    EXPECT_NE(busy.find("capture_busy"), std::string::npos);
+    const auto playing = request_mode("/sidelantern/v1/stream-modes").second;
+    EXPECT_NE(playing.find("join_current=\"1\""), std::string::npos);
+    for (const auto *id : {"primary", "secondary", "extend"}) {
+      EXPECT_NE(playing.find(std::string {"id=\""} + id + "\" available=\"1\""), std::string::npos);
+    }
+    const auto incomplete = request_mode("/launch?sidelantern_mode=extend").second;
+    EXPECT_NE(incomplete.find("Missing a required launch parameter"), std::string::npos);
     const auto sessions = rtsp_stream::active_sessions();
     ASSERT_EQ(sessions.size(), 1);
     EXPECT_EQ(sessions.front().device_id, first_id);
+    const auto joined = request_mode("/launch?sidelantern_mode=primary&appid=0&localAudioPlayMode=1&rikeyid=1&rikey=46464646464646464646464646464646").second;
+    auto ticket = rtsp_stream::test_support::pending_launch();
+    ASSERT_TRUE(ticket) << joined;
+    const auto ticket_id = ticket->id;
+    auto clear_ticket = util::fail_guard([ticket_id] { rtsp_stream::launch_session_clear(ticket_id); });
+    EXPECT_NE(joined.find("status_code=\"200\""), std::string::npos);
+    EXPECT_EQ(ticket->required_display_id, "virtual");
+    EXPECT_EQ(ticket->display_claim, lifetime.lock());
+    clear.disable();
+    rtsp_stream::test_support::remove_session(active);
+    active.reset();
+    ticket.reset();
+    EXPECT_FALSE(lifetime.expired());
+    rtsp_stream::launch_session_clear(ticket_id);
+    clear_ticket.disable();
+    EXPECT_TRUE(lifetime.expired());
   }
   EXPECT_EQ(request_mode("/sidelantern/v1/stream-modes", "first").first, "401 Unauthorized");
   const std::string manual_path = "/sidelantern/v1/manual-video";

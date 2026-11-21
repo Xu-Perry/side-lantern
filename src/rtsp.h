@@ -158,10 +158,14 @@ namespace rtsp_stream {
    */
   int session_count();
 
-  /** @brief Report streams and pending launches without changing the session registry.
-   * @return True while a launch or stream occupies the shared capture pipeline.
-   */
-  bool capture_busy();
+  /** @brief Display selection shared by clients of one capture pipeline. */
+  struct capture_display_t {
+    std::string required_display_id;  ///< Pinned display ID, or empty for the normal Sunshine source.
+    std::shared_ptr<platf::deinit_t> display_claim;  ///< Holds the selected display and any temporary layout.
+  };
+
+  /** @brief Retain the current capture selection, including one pending RTSP setup. */
+  std::optional<capture_display_t> current_capture_display();
 
   /**
    * @brief Snapshot the running streams with a connected control peer.
@@ -192,9 +196,14 @@ namespace rtsp_stream {
      * @param device_id Persistent paired device UUID.
      * @param name Friendly device name.
      * @param connected Whether the session has established its control channel.
+     * @param settings Optional manual video state.
+     * @param display Display selection retained by the simulated stream.
      * @return Session handle to remove from the registry after the test.
      */
-    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings = {});
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings = {}, capture_display_t display = {});
+
+    /** @brief Inspect the launch ticket produced by the authenticated HTTPS handler. */
+    std::shared_ptr<launch_session_t> pending_launch();
 
     /**
      * @brief Remove a threadless session after testing the session registry.

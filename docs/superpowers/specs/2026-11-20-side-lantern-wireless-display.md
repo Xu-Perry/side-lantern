@@ -12,9 +12,9 @@ iPad 用户在选定主机后主动选择「只连主屏」「只连副屏」或
 
 开始桌面串流时，iPad 选用 `/applist` 中的 `Desktop` 条目，并在现有 `/launch` 或 `/resume` 请求的参数中追加 `sidelantern_mode=primary|secondary|extend`。主机再次检查模式和显示器状态。成功时沿用现有的 RTSP 会话地址。拒绝时 `status_code` 为非 200，`sidelantern_reason` 为稳定的原因代码。发现接口只描述当前状态，串流请求本身决定是否能够开始。
 
-首版共享一条采集管线，三个模式需要采集空闲，已有串流继续运行。主屏或副屏目标在会话内按稳定 ID 固定，显示器断开时结束会话。临时布局由会话持有，申请失败、协商超时或会话结束时恢复。失败原因包括 `unknown_mode`、`capture_busy`、`primary_display_unavailable`、`secondary_display_unavailable`、`multiple_secondary_displays`、`other_displays_active`、`display_preparation_failed` 和 `unsupported_platform`。
+第一台设备决定采集哪块屏幕。后续设备通过 `/resume` 加入正在运行的应用，共享当前采集画面，也可使用普通 Moonlight 入口。新请求带上的选屏模式只在启动第一路串流时生效。模式发现返回 `join_current="1"` 时，客户端可显示「加入当前串流」。显式选定的显示器按稳定 ID 固定。若主机为串流临时改了显示布局，所有共享该画面的会话都会持有布局，最后一路结束后恢复。首路申请失败或协商超时也会恢复布局。
 
-副屏模式优先使用主机明确选定的非主屏目标。没有此类配置时，通过 Windows 显示设备的硬件 ID 识别 MttVDD，自动选取唯一可用的输出。驱动已提供可用输出但输出未启用时，连接时可自动加入 Windows 扩展布局。驱动尚未提供输出时，需先在驱动控制面板启用一个。若出现多个可用虚拟输出，需在主机选定其中一个。处于镜像布局的输出需先改为独立输出。`primary` 始终解析当前主显示器。收到 `capture_busy` 时，客户端应保留当前会话并提示用户稍后再试。
+副屏模式优先使用主机明确选定的非主屏目标。没有此类配置时，通过 Windows 显示设备的硬件 ID 识别 MttVDD，自动选取唯一可用的输出。驱动已提供可用输出但输出未启用时，连接时可自动加入 Windows 扩展布局。驱动尚未提供输出时，需先在驱动控制面板启用一个。若出现多个可用虚拟输出，需在主机选定其中一个。处于镜像布局的输出需先改为独立输出。首路串流选择 `primary` 时解析当前主显示器。失败原因包括 `unknown_mode`、`primary_display_unavailable`、`secondary_display_unavailable`、`multiple_secondary_displays`、`other_displays_active`、`display_preparation_failed` 和 `unsupported_platform`。
 
 串流期间在 Windows「显示设置」修改 MttVDD 的桌面分辨率后，主机会在正常断开或退出时按虚拟屏 ID 保存。下次临时启用该屏时，主机尝试应用保存的分辨率。虚拟屏已经启用时，使用它当前的桌面分辨率。若驱动不再支持保存的分辨率，这次会话使用 Windows 选出的模式，原偏好保留到用户再次手动修改。这个偏好独立于串流画面的编码分辨率。
 

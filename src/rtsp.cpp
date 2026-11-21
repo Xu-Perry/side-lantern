@@ -594,6 +594,18 @@ namespace rtsp_stream {
       return (int) _session_slots->size();
     }
 
+    /** @brief Snapshot the source of the shared capture while excluding stream teardown. */
+    std::optional<capture_display_t> current_capture_display() {
+      auto lock = _session_slots.lock();
+      if (!_session_slots->empty()) {
+        return stream::session::capture_display(**_session_slots->begin());
+      }
+      if (const auto pending = launch_event.view(0s)) {
+        return capture_display_t {pending->required_display_id, pending->display_claim};
+      }
+      return std::nullopt;
+    }
+
     /**
      * @brief Copy the connected session identities under the session registry lock.
      * @return Point-in-time identities of the active streams.
@@ -678,7 +690,7 @@ namespace rtsp_stream {
         return 403;
       }
       const auto pending = launch_event.view(0s);
-      if (!pending || pending->id != ticket.id || (ticket.display_claim && !_session_slots->empty())) {
+      if (!pending || pending->id != ticket.id) {
         return 409;
       }
       const auto slot = _session_slots->emplace(session).first;
@@ -764,8 +776,8 @@ namespace rtsp_stream {
     return server.session_count();
   }
 
-  bool capture_busy() {
-    return server.launch_event.view(0s) || server.session_count() != 0;
+  std::optional<capture_display_t> current_capture_display() {
+    return server.current_capture_display();
   }
 
   std::vector<active_session_t> active_sessions() {
@@ -780,10 +792,14 @@ namespace rtsp_stream {
 
 #ifdef SUNSHINE_TESTS
   namespace test_support {
-    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings) {
-      auto session = stream::session::test_support::make_session({std::move(device_id), std::move(name)}, connected, std::move(settings));
+    std::shared_ptr<stream::session_t> insert_session(std::string device_id, std::string name, bool connected, std::shared_ptr<video::manual_video_settings_t> settings, capture_display_t display) {
+      auto session = stream::session::test_support::make_session({std::move(device_id), std::move(name)}, connected, std::move(settings), std::move(display));
       server.insert(session);
       return session;
+    }
+
+    std::shared_ptr<launch_session_t> pending_launch() {
+      return server.launch_event.view(0s);
     }
 
     void remove_session(const std::shared_ptr<stream::session_t> &session) {

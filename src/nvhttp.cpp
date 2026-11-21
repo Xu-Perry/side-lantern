@@ -1496,10 +1496,11 @@ namespace nvhttp {
       std::pair {"extend"sv, stream_mode_e::extend}
     };  ///< Stable mode identifiers exposed to clients.
 
-    /** @brief Validated mode and capture target, or a legacy request with no explicit mode. */
+    /** @brief A requested first-stream mode or an existing capture to join. */
     struct stream_request_t {
       std::optional<stream_mode_e> mode;  ///< Explicit mode, if requested.
       display_device::stream_display_t display;  ///< Selected target for an explicit mode.
+      std::optional<rtsp_stream::capture_display_t> current_display;  ///< Shared source and layout for a joining client.
     };
 
     /** @brief Resolve a display mode available on this host.
@@ -1529,28 +1530,21 @@ namespace nvhttp {
       tree.put("root.resume", 0);
     }
 
-    /** @brief Check mode and capture availability before changing any stream or display state.
+    /** @brief Validate the requested mode and reuse the current capture if one exists.
      * @param args GameStream parameters.
      * @param tree Response document used when rejecting a request.
      * @return Validated request, or no value when it has been rejected.
      */
     std::optional<stream_request_t> validate_stream_request(const args_t &args, pt::ptree &tree) {
       const auto [first, last] = args.equal_range("sidelantern_mode");
-      if (first == last) {
-        if (display_device::stream_display_claimed()) {
-          reject_stream_mode(tree, 409, "capture_busy");
-          return std::nullopt;
-        }
-        return stream_request_t {};
-      }
-      const auto requested = std::ranges::find(stream_modes, first->second, [](const auto &item) { return item.first; });
-      if (requested == stream_modes.end() || std::next(first) != last) {
+      const auto requested = first == last ? stream_modes.end() : std::ranges::find(stream_modes, first->second, [](const auto &item) { return item.first; });
+      if (first != last && (requested == stream_modes.end() || std::next(first) != last)) {
         reject_stream_mode(tree, 400, "unknown_mode");
         return std::nullopt;
       }
-      if (display_device::stream_display_claimed() || rtsp_stream::capture_busy()) {
-        reject_stream_mode(tree, 409, "capture_busy");
-        return std::nullopt;
+      auto current = rtsp_stream::current_capture_display();
+      if (current || requested == stream_modes.end()) {
+        return stream_request_t {{}, {}, std::move(current)};
       }
       const auto virtual_targets = requested->second == stream_mode_e::primary ? display_device::StringSet {} : display_device::enumerate_mttvdd_targets();
       auto display = mode_display(requested->second, display_device::enumerate_devices(), virtual_targets);
@@ -1558,7 +1552,7 @@ namespace nvhttp {
         reject_stream_mode(tree, display.reason == "unsupported_platform" ? 501 : 503, display.reason);
         return std::nullopt;
       }
-      return stream_request_t {requested->second, std::move(display)};
+      return stream_request_t {requested->second, std::move(display), {}};
     }
 
     /** @brief Prepare the selected source and attach its lifetime to the RTSP ticket.
@@ -1568,6 +1562,11 @@ namespace nvhttp {
      * @return Whether the request can proceed.
      */
     bool prepare_stream_request(const stream_request_t &request, rtsp_stream::launch_session_t &ticket, pt::ptree &tree) {
+      if (request.current_display) {
+        ticket.required_display_id = request.current_display->required_display_id;
+        ticket.display_claim = request.current_display->display_claim;
+        return true;
+      }
       if (!request.mode) {
         return true;
       }
@@ -1585,19 +1584,19 @@ namespace nvhttp {
      * @param response HTTPS response.
      */
     void stream_mode_list(const resp_https_t &response) {
-      const auto devices = display_device::enumerate_devices();
-      const auto busy = display_device::stream_display_claimed() || rtsp_stream::capture_busy();
-      const auto virtual_targets = busy ? display_device::StringSet {} : display_device::enumerate_mttvdd_targets();
+      const auto joining = rtsp_stream::current_capture_display().has_value();
+      const auto devices = joining ? display_device::EnumeratedDeviceList {} : display_device::enumerate_devices();
+      const auto virtual_targets = joining ? display_device::StringSet {} : display_device::enumerate_mttvdd_targets();
       pt::ptree tree;
       auto &root = tree.add_child("root", pt::ptree {});
       root.put("<xmlattr>.status_code", 200);
       root.put("<xmlattr>.version", 1);
+      root.put("<xmlattr>.join_current", joining ? 1 : 0);
 #ifdef _WIN32
       root.put("<xmlattr>.manual_video_version", 1);
 #endif
       for (const auto &[id, mode] : stream_modes) {
-        const auto target = mode_display(mode, devices, virtual_targets);
-        const auto reason = busy ? "capture_busy"sv : target.reason;
+        const auto reason = joining ? std::string_view {} : mode_display(mode, devices, virtual_targets).reason;
         auto &item = root.add_child("mode", pt::ptree {});
         item.put("<xmlattr>.id", std::string {id});
         item.put("<xmlattr>.available", reason.empty() ? 1 : 0);
@@ -1748,7 +1747,7 @@ namespace nvhttp {
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args, client);
 
-    if (!stream_request->mode && rtsp_stream::session_count() == 0) {
+    if (!stream_request->mode && !stream_request->current_display && rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
       revert_display_configuration = true;
 
@@ -1865,7 +1864,7 @@ namespace nvhttp {
     // Newer Moonlight clients send localAudioPlayMode on /resume too,
     // so we should use it if it's present in the args and there are
     // no active sessions we could be interfering with.
-    const bool no_active_sessions {rtsp_stream::session_count() == 0};
+    const bool no_active_sessions {!stream_request->current_display && rtsp_stream::session_count() == 0};
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }

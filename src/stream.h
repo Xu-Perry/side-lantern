@@ -104,6 +104,9 @@ namespace stream {
      */
     std::optional<rtsp_stream::active_session_t> active_identity(const session_t &session);
 
+    /** @brief Return the display selection and retain its layout while another client joins. */
+    rtsp_stream::capture_display_t capture_display(const session_t &session);
+
     /** @brief Get the active client's manual video settings. @param session Runtime session. @param client_id Paired UUID. @return Settings for the matching active session. */
     std::optional<rtsp_stream::manual_video_session_t> manual_video_session(const session_t &session, std::string_view client_id);
 
@@ -113,9 +116,11 @@ namespace stream {
        * @brief Construct a session without starting workers for snapshot tests.
        * @param identity Identity to associate with the paired client.
        * @param connected Whether the control channel has connected.
+       * @param settings Optional manual video state.
+       * @param display Display selection retained by the simulated stream.
        * @return Threadless sample session.
        */
-      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings = {});
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings, rtsp_stream::capture_display_t display);
     }  // namespace test_support
 #endif
   }  // namespace session

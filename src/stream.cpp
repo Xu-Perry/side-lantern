@@ -2287,6 +2287,10 @@ namespace stream {
       return session.client_identity;
     }
 
+    rtsp_stream::capture_display_t capture_display(const session_t &session) {
+      return {session.config.monitor.required_display_id, session.display_claim};
+    }
+
     std::optional<rtsp_stream::manual_video_session_t> manual_video_session(const session_t &session, std::string_view client_id) {
       if (session.config.monitor.manual_settings && session.client_identity.device_id == client_id && active_identity(session)) {
         return rtsp_stream::manual_video_session_t {session.launch_session_id, session.config.monitor.manual_settings};
@@ -2485,10 +2489,12 @@ namespace stream {
 
 #ifdef SUNSHINE_TESTS
     namespace test_support {
-      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings) {
+      std::shared_ptr<session_t> make_session(rtsp_stream::active_session_t identity, bool connected, std::shared_ptr<video::manual_video_settings_t> settings, rtsp_stream::capture_display_t display) {
         auto session = std::make_shared<session_t>();
         session->launch_session_id = 42;
         session->config.monitor.manual_settings = std::move(settings);
+        session->config.monitor.required_display_id = std::move(display.required_display_id);
+        session->display_claim = std::move(display.display_claim);
         session->client_identity = std::move(identity);
         session->control.connected.store(connected, std::memory_order_relaxed);
         session->state.store(state_e::RUNNING, std::memory_order_relaxed);
