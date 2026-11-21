@@ -1,8 +1,8 @@
 # SideLantern 文件传输设计
 
-首版面向 SideLantern iPad 客户端和 Windows 主机，支持双向传输。用户在 iPad 的「设备管理」选中已配对的电脑，再进入「文件传输」。浏览和收发文件可以在没有串流会话的情况下进行，任务独立于串流的启动和结束。Windows 主机协议见下文，客户端界面和主机的共享配置界面待接入。
+首版面向 SideLantern iPad 客户端和 Windows 主机。用户在 iPad 的设备管理选中已配对的电脑，从设备菜单打开「浏览电脑文件」。iPad 默认展示 Windows 已挂载的本地驱动器，可以进入目录并下载文件。浏览和收发文件无需启动串流会话。
 
-## 文件传输页
+## 文件传输页规划
 
 页眉显示电脑名称和在线状态，返回键回到设备管理。页面按以下顺序显示操作、传输中任务和历史记录。
 
@@ -18,30 +18,25 @@
 
 ## 电脑文件页
 
-- 返回键回到「文件传输」。iPad 宽屏下左侧为「共享位置」，右侧为当前目录。窄屏时共享位置移到列表上方。
-- 共享位置由 Windows 主机授权。授权后可显示「下载」「文档」「桌面」等快捷目录，也可以显示单独授权的磁盘根目录。主机尚未授权任何位置时，提示到 Windows 端设置共享位置。
-- 目录页显示当前路径。点文件夹进入下一级，点路径可返回上一级。文件行显示名称、大小和时间，并支持在当前目录多选。底部显示已选数量，点「下载到 iPad」后返回「文件传输」页查看任务进度。
+- 从设备菜单打开时先显示 Windows 驱动器列表。返回键按目录层级回到驱动器列表，再返回设备管理。
+- 已配对设备直接使用主机的本地驱动器列表。主机自动发现盘符，读文件时使用 Windows 当前用户的访问权限，并排除 SideLantern 的私有数据目录。
+- 点文件夹进入下一级，使用导航栏返回上一级。点文件开始下载，可查看进度和取消。下载完成后通过系统分享面板保存到「文件」。
 
-## 主机授权
+## 配对与访问范围
 
-首版以现有配对设备身份作为文件传输授权的基础。Windows 端管理允许客户端浏览和下载的共享位置，以及接收 iPad 发来文件的目录。主机在每次列目录、下载或接收文件时校验设备权限和实际路径范围。取消共享或解除配对后，后续请求失去访问权限。
+文件传输使用现有配对设备身份。主机在每个请求上校验证书和实际路径，解除配对后后续请求失去访问权限。浏览和下载默认提供本地驱动器；接收 iPad 发来的上传仍使用单独的收件目录。
 
 ## Windows 主机配置
 
-安装版使用 `%LOCALAPPDATA%\SideLantern\host\config\file-transfer.json`。配置由主机用户维护，每次请求重新读取。缺少文件时功能关闭。共享目录和接收目录都应已存在，并使用 Windows 本地盘符的绝对路径。
+浏览和下载无需配置。安装版可选配置保存在 `%LOCALAPPDATA%\SideLantern\host\config\file-transfer.json`，每次请求重新读取。写入接收目录后，主机才接收 iPad 上传。接收目录应已存在，并使用 Windows 本地盘符的绝对路径。
 
 ```json
 {
-  "devices": ["01234567-89ab-4cde-8f01-23456789abcd"],
-  "roots": [
-    {"id": "downloads", "label": "下载", "path": "D:/Downloads"}
-  ],
   "inbox": "D:/SideLantern/Incoming"
 }
 ```
 
-- `devices` 指定有文件访问权限的配对设备 UUID，可以从本机管理接口 `GET /api/clients/list` 的 `named_certs[].uuid` 取得。省略 `devices` 会授权全部当前及未来已配对设备。设为空数组会拒绝所有设备。
-- `roots` 列出客户端可浏览和下载的位置。客户端只收到 `id` 和 `label`。共享 ID 支持字母、数字、连字符和下划线。共享整个盘符时，该盘下符合访问条件的文件都可浏览。
+- 旧配置显式指定的 `devices` 或 `roots` 仍作为访问范围。只有保留旧 `roots` 的主机会显示手动位置；省略该字段时自动列出本地盘符。
 - `inbox` 是上传接收目录。客户端只传最终文件名。省略 `inbox` 会关闭上传。完成后原名发布，同名目标存在时返回冲突。
 - 浏览跳过重解析点，下载拒绝重解析点和硬链接文件。上传和下载都拒绝可跨出授权目录的路径。接收目录与浏览目录可以分开。两者重叠时，上传完成的文件也可在相应共享中读取。
 
@@ -51,7 +46,7 @@
 
 | 方法和相对路径 | 请求及返回 |
 | --- | --- |
-| `GET` 前缀本身 | 返回 `version`、`enabled`、`roots`、`upload`、`upload_chunk_bytes`、`download_chunk_bytes`、`max_upload_bytes` 和 `upload_idle_seconds`。收到有效的版本 1 JSON 才显示入口。HTTP 404 或 GameStream XML 的 404 表示旧主机缺少该接口。 |
+| `GET` 前缀本身 | 返回 `version`、`enabled`、`roots`、`upload`、`upload_chunk_bytes`、`download_chunk_bytes`、`max_upload_bytes` 和 `upload_idle_seconds`。本地驱动器项含 `id`（如 `drive-C`）、`label`（如 `C:`）和 `kind: "drive"`。旧共享目录的 `kind` 为 `"share"`；客户端兼容早期响应省略该字段的情况。HTTP 404 或 GameStream XML 的 404 表示旧主机缺少该接口。 |
 | `GET /list` | 参数 `root` 是共享 ID。省略 `path` 可浏览共享根目录。返回 `entries`，每项有 `name`、`kind`（`file` 或 `directory`）、`size`、`modified_unix_ms` 和 `version`。分页时将 `next_offset` 用作下一次查询的 `offset`。它为 null 时结束。达到目录扫描上限时 `truncated` 为 true。 |
 | `GET /download` | 参数 `root`、`path`、`offset`（默认 0）和 `length`（默认且最大 1 MiB）。返回 `application/octet-stream`，以及 `X-SideLantern-File-Size`（总字节数）和 `X-SideLantern-File-Version`。续传时用返回值作为 `version`。 |
 | `POST /uploads` | 正文为 `application/json`，含 `name` 和 `size`（总字节数）。返回 201 和 `{id,name,size,offset,complete}`。 |
@@ -67,6 +62,6 @@
 ## 首版验收
 
 1. Windows 主机在线且无串流会话时，iPad 能从设备管理进入文件传输，分别发送照片、视频和普通文件，并在 Windows 接收目录中找到文件。
-2. iPad 只看到主机授权的共享位置。进入子目录后可以选中多个文件，下载完成后显示在「已接收」记录中，并可保存到系统「文件」。
+2. 已配对的 iPad 可以直接看到 Windows 的本地驱动器。可以进入子目录、选择文件并下载到系统「文件」。
 3. 下载与上传都能查看进度、暂停、继续和取消。结束串流会话时在途文件继续传输。清空记录后，已保存的文件仍可打开。
 4. 电脑离线或目录授权撤销时，界面显示相应状态。界面使用客户端的中英文和主题设置。

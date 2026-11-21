@@ -193,8 +193,31 @@ namespace file_transfer::storage {
       return value == L'\\' || value == L'/';
     }
 
+    /** @brief Resolve a mounted local drive letter without following network or DOS drive aliases. */
+    bool local_volume_name(const wchar_t *drive, wchar_t (&volume)[MAX_PATH]) {
+      const auto type = GetDriveTypeW(drive);
+      return (type == DRIVE_FIXED || type == DRIVE_REMOVABLE || type == DRIVE_CDROM || type == DRIVE_RAMDISK) &&
+             GetVolumeNameForVolumeMountPointW(drive, volume, MAX_PATH);
+    }
+
+    /** @brief Check whether a Windows object is the excluded directory. */
+    bool is_private(std::uint64_t volume, const FILE_ID_128 &id, const FILE_ID_INFO *private_id) {
+      return private_id && volume == private_id->VolumeSerialNumber &&
+             std::ranges::equal(id.Identifier, private_id->FileId.Identifier);
+    }
+
+    /** @brief Prevent traversal into app data by directory identity, including alternate spellings. */
+    void require_public(HANDLE directory, const FILE_ID_INFO *private_id) {
+      if (private_id) {
+        const auto id = info<FILE_ID_INFO>(directory, FileIdInfo);
+        if (is_private(id.VolumeSerialNumber, id.FileId, private_id)) {
+          throw error {error_code::forbidden};
+        }
+      }
+    }
+
     /** @brief Pin the actual volume root and every directory up to the destination. */
-    directory_chain open_directories(const std::filesystem::path &root, const std::vector<std::wstring_view> &relative, ACCESS_MASK final_access = 0) {
+    directory_chain open_directories(const std::filesystem::path &root, const std::vector<std::wstring_view> &relative, ACCESS_MASK final_access = 0, const FILE_ID_INFO *private_id = nullptr) {
       const std::wstring_view path = root.native();
       if (path.size() < 3 || !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) || path[1] != L':' || !root_separator(path[2])) {
         throw error {error_code::invalid};
@@ -210,18 +233,9 @@ namespace file_transfer::storage {
       names.insert(names.end(), relative.begin(), relative.end());
 
       const wchar_t drive[] {path[0], L':', L'\\', L'\0'};
-      switch (GetDriveTypeW(drive)) {
-        case DRIVE_FIXED:
-        case DRIVE_REMOVABLE:
-        case DRIVE_CDROM:
-        case DRIVE_RAMDISK:
-          break;
-        default:
-          throw error {error_code::forbidden};
-      }
       // A volume GUID names the mounted drive itself and avoids DOS device aliases.
       wchar_t volume[MAX_PATH] {};
-      if (!GetVolumeNameForVolumeMountPointW(drive, volume, MAX_PATH)) {
+      if (!local_volume_name(drive, volume)) {
         throw error {error_code::forbidden};
       }
       const auto handle = CreateFileW(volume, directory_access | (names.empty() ? final_access : 0), directory_sharing, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -230,15 +244,36 @@ namespace file_transfer::storage {
       }
       file_handle volume_root {handle};
       verify_disk_handle(handle);
+      require_public(handle, private_id);
       directory_chain result;
       result.reserve(names.size() + 1);
       result.push_back(std::move(volume_root));
       for (size_t index = 0; index < names.size(); ++index) {
         const auto access = directory_access | (index + 1 == names.size() ? final_access : 0);
         result.push_back(open_child(result.back().get(), names[index], access, directory_sharing, FILE_OPEN, FILE_DIRECTORY_FILE));
+        require_public(result.back().get(), private_id);
       }
       return result;
     }
+
+    /** @brief Keep the excluded directory stable during a browse or download request. */
+    struct private_directory_guard {
+      directory_chain handles;  ///< Pin the private directory and its ancestors.
+      std::optional<FILE_ID_INFO> id;  ///< Private directory identity, if applicable.
+
+      /** @brief Resolve the private directory once for this operation. */
+      explicit private_directory_guard(const std::filesystem::path &path) {
+        if (!path.empty()) {
+          handles = open_directories(path, {});
+          id = info<FILE_ID_INFO>(handles.back().get(), FileIdInfo);
+        }
+      }
+
+      /** @brief Obtain the identity for traversal checks. */
+      const FILE_ID_INFO *get() const {
+        return id ? &*id : nullptr;
+      }
+    };
 
     /** @brief Append fixed-width hexadecimal bytes to an opaque revision string. */
     void append_hex(std::string &result, const auto &value) {
@@ -336,12 +371,28 @@ namespace file_transfer::storage {
       code {code} {
   }
 
-  page list(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit) {
+  std::vector<std::filesystem::path> local_drive_roots() {
+    std::vector<std::filesystem::path> result;
+    const auto drives = GetLogicalDrives();
+    for (unsigned int bit = 0; bit < 26; ++bit) {
+      if (drives & (1UL << bit)) {
+        const wchar_t drive[] {static_cast<wchar_t>(L'A' + bit), L':', L'\\', L'\0'};
+        wchar_t volume[MAX_PATH] {};
+        if (local_volume_name(drive, volume)) {
+          result.emplace_back(drive);
+        }
+      }
+    }
+    return result;
+  }
+
+  page list(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, const std::filesystem::path &private_directory) {
     if (limit == 0) {
       throw error {error_code::invalid};
     }
     const auto path = decode(relative);
-    const auto directories = open_directories(root, components(path, L"/"), FILE_LIST_DIRECTORY);
+    const private_directory_guard private_scope {private_directory};
+    const auto directories = open_directories(root, components(path, L"/"), FILE_LIST_DIRECTORY, private_scope.get());
     const auto directory = directories.back().get();
     const auto serial = info<FILE_ID_INFO>(directory, FileIdInfo).VolumeSerialNumber;
     alignas(FILE_ID_EXTD_DIR_INFO) std::array<std::byte, 16384> buffer;
@@ -352,7 +403,8 @@ namespace file_transfer::storage {
       while (true) {
         const auto attributes = record->FileAttributes;
         const std::wstring_view name {record->FileName, record->FileNameLength / sizeof(wchar_t)};
-        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 && valid_component(name)) {
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 && valid_component(name) &&
+            !is_private(serial, record->FileId, private_scope.get())) {
           if (auto encoded = encode(name)) {
             if (skipped < offset) {
               ++skipped;
@@ -386,7 +438,7 @@ namespace file_transfer::storage {
     return result;
   }
 
-  download read(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, std::string_view version) {
+  download read(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, std::string_view version, const std::filesystem::path &private_directory) {
     const auto path = decode(relative);
     auto parts = components(path, L"/");
     if (parts.empty() || limit == 0 || limit > MAXDWORD) {
@@ -394,7 +446,8 @@ namespace file_transfer::storage {
     }
     const auto filename = parts.back();
     parts.pop_back();
-    const auto directories = open_directories(root, parts);
+    const private_directory_guard private_scope {private_directory};
+    const auto directories = open_directories(root, parts, 0, private_scope.get());
     const auto file = open_child(directories.back().get(), filename, FILE_READ_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_OPEN, 0);
     auto metadata = verify_file(file.get());
     if (!version.empty() && metadata.version != version) {

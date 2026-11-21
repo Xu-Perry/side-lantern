@@ -1951,7 +1951,14 @@ namespace nvhttp {
 #ifdef _WIN32
     /** @brief Access the local file transfer service for the engine process. */
     const std::shared_ptr<file_transfer::service> &local_file_transfers() {
-      static const auto transfers = std::make_shared<file_transfer::service>(platf::appdata() / "file-transfer.json");
+      static const auto transfers = [] {
+        const auto config = platf::appdata();
+        const auto profile = config.parent_path();
+        const auto app_profile = profile.parent_path();
+        const auto &private_directory = profile.filename() != "host" ? config :
+                                       app_profile.filename() == "SideLantern" ? app_profile : profile;
+        return std::make_shared<file_transfer::service>(config / "file-transfer.json", private_directory);
+      }();
       return transfers;
     }
 

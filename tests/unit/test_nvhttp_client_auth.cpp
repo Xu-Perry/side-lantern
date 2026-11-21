@@ -162,7 +162,10 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   constexpr auto upload_path = "/sidelantern/v1/files/uploads";
   const auto files = first.request("GET", "/sidelantern/v1/files");
   ASSERT_EQ(files->status_code, "200 OK");
-  EXPECT_EQ(nlohmann::json::parse(files->content.string()).at("upload"), true);
+  const auto file_capabilities = nlohmann::json::parse(files->content.string());
+  EXPECT_EQ(file_capabilities.at("upload"), true);
+  EXPECT_FALSE(file_capabilities.at("roots").empty());
+  EXPECT_EQ(file_capabilities.at("roots").front().at("kind"), "drive");
   const auto file_name = "tls-test-" + first_id + ".bin";
   const auto upload = first.request("POST", upload_path, nlohmann::json {{"name", file_name}, {"size", 2}}.dump(),
                                     {{"Content-Type", "application/json"}});

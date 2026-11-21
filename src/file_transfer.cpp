@@ -58,6 +58,7 @@ namespace file_transfer {
       std::map<std::string, share, std::less<>> roots;  ///< Share identifier to configured location.
       fs::path inbox;  ///< Empty when receiving files is disabled.
       std::optional<std::vector<std::string>> devices;  ///< Explicit allowed paired-device IDs, if configured.
+      bool browse_drives = true;  ///< Use local drives by default unless an older profile defined shares.
 
       /** @brief Check whether the paired device may access files. */
       bool allows(std::string_view device) const {
@@ -128,7 +129,7 @@ namespace file_transfer {
       return path;
     }
 
-    /** @brief Load the opt-in share settings or return an empty disabled configuration. */
+    /** @brief Load optional file settings. A fresh profile uses automatic local drive browsing. */
     settings read_settings(const fs::path &path) {
       std::ifstream stream {path, std::ios::binary};
       if (!stream) {
@@ -158,6 +159,7 @@ namespace file_transfer {
           config.inbox = parse_path(document.at("inbox"));
         }
         if (document.contains("roots")) {
+          config.browse_drives = false;
           const auto &roots = document.at("roots");
           if (!roots.is_array()) {
             throw rejection {503, "invalid_configuration"};
@@ -177,6 +179,34 @@ namespace file_transfer {
       } catch (const fs::filesystem_error &) {
         throw rejection {503, "invalid_configuration"};
       }
+    }
+
+    /** @brief Return browse roots without disclosing paths to the client. */
+    json public_roots(const settings &config) {
+      auto roots = json::array();
+      if (config.browse_drives) {
+        for (const auto &root : storage::local_drive_roots()) {
+          const auto name = root.root_name().string();
+          roots.push_back({{"id", "drive-" + name.substr(0, 1)}, {"label", name}, {"kind", "drive"}});
+        }
+      } else {
+        for (const auto &[id, root] : config.roots) {
+          roots.push_back({{"id", id}, {"label", root.label}, {"kind", "share"}});
+        }
+      }
+      return roots;
+    }
+
+    /** @brief Find a configured location or derive a drive root that storage will validate. */
+    fs::path resolve_root(const settings &config, std::string_view id) {
+      if (config.browse_drives) {
+        if (id.size() == 7 && id.starts_with("drive-") && id.back() >= 'A' && id.back() <= 'Z') {
+          return fs::path(std::string(1, id.back()) + ":/");
+        }
+      } else if (const auto root = config.roots.find(id); root != config.roots.end()) {
+        return root->second.path;
+      }
+      throw rejection {404, "root_not_found"};
     }
 
     /** @brief Return the public fields of an upload without exposing the owner's identity. */
@@ -230,11 +260,14 @@ namespace file_transfer {
   /** @brief Bounds the upload queue and serializes each job's filesystem updates. */
   struct service::impl {
     fs::path settings_file;  ///< Local file configured by the Windows user.
+    fs::path private_directory;  ///< Host profile excluded from browse requests.
     std::mutex mutex;  ///< Protects the upload map from concurrent requests.
     std::map<std::string, upload_job, std::less<>> jobs;  ///< Upload state scoped to the current engine process.
 
     /** @brief Initialize storage for the given host settings path. */
-    explicit impl(fs::path path): settings_file {std::move(path)} {}
+    explicit impl(fs::path path, fs::path private_path):
+        settings_file {std::move(path)},
+        private_directory {std::move(private_path)} {}
 
     /** @brief Discard expired jobs and files whose owner or inbox has lost access. */
     void prune(const settings &config) {
@@ -354,7 +387,8 @@ namespace file_transfer {
     }
   };
 
-  service::service(fs::path settings_file): data {std::make_unique<impl>(std::move(settings_file))} {}
+  service::service(fs::path settings_file, fs::path private_directory):
+      data {std::make_unique<impl>(std::move(settings_file), std::move(private_directory))} {}
 
   service::~service() = default;
 
@@ -371,26 +405,20 @@ namespace file_transfer {
       if (!config.allows(device)) {
         throw rejection {403, "device_forbidden"};
       }
-      const auto enabled = !config.inbox.empty() || !config.roots.empty();
       if (action == operation::capabilities) {
-        auto roots = json::array();
-        for (const auto &[id, root] : config.roots) {
-          roots.push_back({{"id", id}, {"label", root.label}});
-        }
+        auto roots = public_roots(config);
+        const bool enabled = !config.inbox.empty() || !roots.empty();
         return json_reply(200, {
           {"version", 1}, {"enabled", enabled}, {"roots", std::move(roots)}, {"upload", !config.inbox.empty()},
           {"upload_chunk_bytes", upload_chunk_bytes}, {"download_chunk_bytes", download_chunk_bytes},
           {"max_upload_bytes", max_upload_bytes}, {"upload_idle_seconds", std::chrono::duration_cast<std::chrono::seconds>(job_timeout).count()},
         });
       }
-      if (!enabled) {
+      if (!config.browse_drives && config.inbox.empty() && config.roots.empty()) {
         throw rejection {403, "file_transfer_disabled"};
       }
       if (action == operation::list || action == operation::download) {
-        const auto root = config.roots.find(arg(query, "root"));
-        if (root == config.roots.end()) {
-          throw rejection {404, "root_not_found"};
-        }
+        const auto root = resolve_root(config, arg(query, "root"));
         const auto path = arg(query, "path");
         const auto offset = number_arg(query, "offset", "0");
         if (path.size() > 4096) {
@@ -400,7 +428,7 @@ namespace file_transfer {
           if (offset > max_list_offset) {
             throw rejection {400, "invalid_query"};
           }
-          const auto page = storage::list(root->second.path, path, offset, page_entries);
+          const auto page = storage::list(root, path, offset, page_entries, data->private_directory);
           auto entries = json::array();
           for (const auto &entry : page.entries) {
             entries.push_back({{"name", entry.name}, {"kind", entry.directory ? "directory" : "file"},
@@ -415,7 +443,7 @@ namespace file_transfer {
         if (length == 0 || length > download_chunk_bytes || (offset != 0 && version.empty())) {
           throw rejection {400, "invalid_query"};
         }
-        auto chunk = storage::read(root->second.path, path, offset, static_cast<std::size_t>(length), version);
+        auto chunk = storage::read(root, path, offset, static_cast<std::size_t>(length), version, data->private_directory);
         return {200, std::move(chunk.bytes), {
           {"Content-Type", "application/octet-stream"}, {"Cache-Control", "no-store"},
           {"X-SideLantern-File-Size", std::to_string(chunk.size)}, {"X-SideLantern-File-Version", std::move(chunk.version)},

@@ -20,6 +20,6 @@ SideLantern 是基于 [Sunshine](https://github.com/SunshineStream/Sunshine) 的
 - 两份原版 Moonlight 在本机隔离环境中同时收到桌面视频。解除其中一份的配对后，另一份保持串流。本机也已验证安装、普通用户启动服务、正常退出、强制结束和卸载，并确认已安装的 ViGEmBus 被复用。
 - 下一轮用局域网内另一台设备验证主屏画面、声音、键鼠和手柄，并复测配对、托盘保活和退出断流。
 - 后续实现虚拟副屏的自动创建、模式切换和退出清理，再为自定义 Moonlight 客户端添加副屏连接入口。正式发行还需要完成安装包签名。
-- Windows 主机已提供双向文件传输接口，iPad 客户端待接入。见 [文件传输设计和接口文档](docs/superpowers/specs/2026-11-21-side-lantern-file-transfer.md)。
+- 文件传输沿用设备配对。客户端可直接浏览 Windows 主机的本地驱动器并下载文件。见 [文件传输设计和接口文档](docs/superpowers/specs/2026-11-21-side-lantern-file-transfer.md)。
 
 项目许可证见 [LICENSE](LICENSE)。

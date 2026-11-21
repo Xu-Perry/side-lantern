@@ -29,12 +29,14 @@ namespace {
   struct fixture {
     fs::path folder = fs::temp_directory_path() / ("file-transfer-" + uuid_util::uuid_t::generate().string());
     fs::path settings = folder / "file-transfer.json";
-    file_transfer::service server {settings};
+    fs::path private_directory = folder / "private";
+    file_transfer::service server {settings, private_directory};
 
     /** @brief Set up a clean test filesystem. */
     fixture() {
       fs::create_directories(folder / "share");
       fs::create_directories(folder / "inbox");
+      fs::create_directories(private_directory);
     }
 
     /** @brief Remove the test filesystem, after the test has closed its upload files. */
@@ -56,15 +58,52 @@ namespace {
   };
 }  // namespace
 
-TEST(FileTransfer, DeniesDevicesWithoutSharePermission) {
+TEST(FileTransfer, BrowsesLocalDrivesWithoutAShareConfiguration) {
   fixture test;
-  const auto off = test.server.execute("allowed", operation::capabilities);
-  ASSERT_EQ(off.status, 200);
-  EXPECT_EQ(json::parse(off.body).at("enabled"), false);
-  EXPECT_EQ(test.server.execute("allowed", operation::list, {{"root", "docs"}}).status, 403);
+  const auto capabilities = test.server.execute("allowed", operation::capabilities);
+  ASSERT_EQ(capabilities.status, 200);
+  const auto info = json::parse(capabilities.body);
+  EXPECT_EQ(info.at("enabled"), true);
+  EXPECT_EQ(info.at("upload"), false);
+  const auto root = test.folder.root_name().string();
+  const auto id = "drive-" + root.substr(0, 1);
+  bool found = false;
+  for (const auto &drive : info.at("roots")) {
+    if (drive.at("id") == id) {
+      found = true;
+      EXPECT_EQ(drive.at("kind"), "drive");
+      EXPECT_EQ(drive.at("label"), root);
+      EXPECT_FALSE(drive.contains("path"));
+    }
+  }
+  ASSERT_TRUE(found);
+  std::ofstream {test.folder / "share" / "direct.txt"} << "from the drive";
+  std::ofstream {test.private_directory / "key.txt"} << "protected";
+  const auto relative = test.folder.relative_path().generic_string();
+  const auto contents = test.server.execute("allowed", operation::list, {{"root", id}, {"path", relative}});
+  ASSERT_EQ(contents.status, 200) << contents.body;
+  const auto entries = json::parse(contents.body).at("entries");
+  for (const auto &entry : entries) {
+    EXPECT_NE(entry.at("name"), "private");
+  }
+  EXPECT_EQ(test.server.execute("allowed", operation::list, {{"root", id}, {"path", relative + "/private"}}).status, 403);
+  EXPECT_EQ(test.server.execute("allowed", operation::download, {{"root", id}, {"path", relative + "/private/key.txt"}}).status, 403);
+  const auto download = test.server.execute("allowed", operation::download, {{"root", id}, {"path", relative + "/share/direct.txt"}});
+  ASSERT_EQ(download.status, 200) << download.body;
+  EXPECT_EQ(download.body, "from the drive");
+}
+
+TEST(FileTransfer, PreservesExplicitLegacyRootRestrictions) {
+  fixture test;
   test.configure(json::array({"allowed"}));
   EXPECT_EQ(test.server.execute("other", operation::capabilities).status, 403);
-  EXPECT_EQ(test.server.execute("allowed", operation::capabilities).status, 200);
+  const auto capabilities = test.server.execute("allowed", operation::capabilities);
+  ASSERT_EQ(capabilities.status, 200);
+  const auto roots = json::parse(capabilities.body).at("roots");
+  ASSERT_EQ(roots.size(), 1u);
+  EXPECT_EQ(roots[0].at("id"), "docs");
+  const auto drive_id = "drive-" + test.folder.root_name().string().substr(0, 1);
+  EXPECT_EQ(test.server.execute("allowed", operation::list, {{"root", drive_id}}).status, 404);
 }
 
 TEST(FileTransfer, ListsSharedFilesAndReadsBinaryChunks) {
@@ -72,7 +111,7 @@ TEST(FileTransfer, ListsSharedFilesAndReadsBinaryChunks) {
   test.configure();
   std::ofstream(test.folder / "share" / "sample.bin", std::ios::binary).write("a\0bc", 4);
   const auto roots = test.server.execute("allowed", operation::capabilities);
-  EXPECT_EQ(json::parse(roots.body).at("roots")[0], (json {{"id", "docs"}, {"label", "Shared"}}));
+  EXPECT_EQ(json::parse(roots.body).at("roots")[0], (json {{"id", "docs"}, {"label", "Shared"}, {"kind", "share"}}));
   const auto listing = test.server.execute("allowed", operation::list, {{"root", "docs"}});
   ASSERT_EQ(listing.status, 200);
   EXPECT_EQ(json::parse(listing.body).at("entries")[0].at("name"), "sample.bin");

@@ -36,8 +36,12 @@ namespace file_transfer {
   /** @brief Owns pending uploads and checks the current host shares for every request. */
   class service {
   public:
-    /** @brief Create a file transfer service using the given optional host settings file. */
-    explicit service(std::filesystem::path settings_file);
+    /**
+     * @brief Create a file transfer service with optional configuration and a private host directory.
+     * @param settings_file Optional legacy share and upload preferences.
+     * @param private_directory Host-owned files excluded from browsing and downloads.
+     */
+    explicit service(std::filesystem::path settings_file, std::filesystem::path private_directory = {});
 
     /** @brief Release pending uploads and their temporary files. */
     ~service();

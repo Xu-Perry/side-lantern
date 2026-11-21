@@ -52,15 +52,19 @@ namespace file_transfer::storage {
     std::optional<uint64_t> next_offset;  ///< Offset of the next page, if present.
   };
 
+  /** @brief Return the drive-letter roots of mounted local volumes. */
+  std::vector<std::filesystem::path> local_drive_roots();
+
   /**
    * @brief Enumerate children of an authorized Windows directory.
    * @param root Absolute, local path configured by the host.
    * @param relative UTF-8 path beneath the root with slash separators, or empty for the root.
    * @param offset Number of visible children to skip.
    * @param limit Maximum number of children to return.
+   * @param private_directory Host-owned directory excluded from browsing, if supplied.
    * @return A listing page with a continuation if more entries exist.
    */
-  page list(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit);
+  page list(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, const std::filesystem::path &private_directory = {});
 
   /** @brief A byte range with information identifying the source file. */
   struct download {
@@ -76,9 +80,10 @@ namespace file_transfer::storage {
    * @param offset Byte offset from which to start reading.
    * @param limit Maximum number of bytes to read.
    * @param version Expected file revision, or empty to accept the current revision.
+   * @param private_directory Host-owned directory excluded from downloads, if supplied.
    * @return File bytes and corresponding metadata.
    */
-  download read(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, std::string_view version);
+  download read(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, std::string_view version, const std::filesystem::path &private_directory = {});
 
   /** @brief A pending upload in a pinned inbox directory. */
   class upload {
