@@ -186,7 +186,7 @@
         <label><span data-i18n="streamAppName">应用名称</span><input type="text" id="stream-app-name" required></label>
         <label><span data-i18n="streamAppCommand">启动命令</span><input type="text" id="stream-app-command" aria-describedby="stream-app-command-help"><small id="stream-app-command-help" class="muted" data-i18n="streamAppCommandHelp">留空时无需启动应用即可串流。</small></label>
         <label><span data-i18n="streamAppDirectory">工作目录</span><input type="text" id="stream-app-directory"></label>
-        <label><span data-i18n="streamAppImage">封面路径</span><input type="text" id="stream-app-image"></label>
+        <label><span data-i18n="streamAppImage">封面路径</span><span class="path-input"><input type="text" id="stream-app-image"><button type="button" class="button" id="stream-app-image-browse" data-i18n="chooseImage">选择图片</button></span></label>
       </div>
       <p class="host-error notice" id="stream-app-feedback" role="alert" hidden></p>
       <div class="dialog-actions">

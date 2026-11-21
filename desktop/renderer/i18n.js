@@ -21,6 +21,7 @@
     streamAppCommandHelp: ['Leave blank to stream without launching an app.', '留空时无需启动应用即可串流。'],
     streamAppDirectory: ['Working directory', '工作目录'],
     streamAppImage: ['Cover image path', '封面路径'],
+    chooseImage: ['Choose image…', '选择图片…'],
     saveStreamApp: ['Save app', '保存应用'],
     noLaunchCommand: ['No launch command', '未设置启动命令'],
     streamingSettings: ['Streaming settings', '串流设置'],

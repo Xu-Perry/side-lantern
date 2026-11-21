@@ -1,7 +1,7 @@
-const { app, BrowserWindow, Menu, nativeImage, nativeTheme, safeStorage, shell, Tray, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, safeStorage, shell, Tray, ipcMain } = require('electron');
 const { execFile } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdirSync } = require('node:fs');
+const { existsSync, mkdirSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,6 +12,7 @@ const { prepareProfile } = require('./lib/profile.cjs');
 const { ensurePortsAvailable, launchEngine, waitForEngine } = require('./lib/engine.cjs');
 const { createSunshineClient } = require('./lib/sunshine-api.cjs');
 const { createVirtualDisplay } = require('./lib/virtual-display.cjs');
+const { createWindowsPngConverter, ensurePngCover } = require('./lib/cover-image.cjs');
 const { exportSunshineProfile, restoreSunshineProfile } = require('./lib/migration.cjs');
 const { windowsBackupStorage } = require('./lib/windows-backup-storage.cjs');
 const { languageFromWindows, validatePreferences } = require('./lib/preferences.cjs');
@@ -23,6 +24,7 @@ const rendererFile = path.join(__dirname, 'renderer', 'index.html');
 const defaultPreferences = {theme: 'system', launchAtLogin: false};
 const smoke = process.argv.includes('--smoke-test');
 const execFileAsync = promisify(execFile);
+const convertCoverImage = createWindowsPngConverter({execFile: execFileAsync});
 let preferences = defaultPreferences;
 let window;
 let windowLoading;
@@ -157,6 +159,24 @@ async function openLogs() {
   if (failure) throw new Error(failure);
 }
 
+async function pickCoverImage(current) {
+  if (process.platform !== 'win32') throw new Error('封面选择目前仅支持 Windows。');
+  const previous = typeof current === 'string' && path.isAbsolute(current) ? current : '';
+  const options = {
+    title: '选择封面图片',
+    defaultPath: previous && existsSync(previous) ? previous : app.getPath('pictures'),
+    properties: ['openFile'],
+    filters: [
+      {name: 'PNG 图片', extensions: ['png']},
+      {name: '其他图片（自动转换为 PNG）', extensions: ['jpg', 'jpeg', 'bmp', 'gif']}
+    ]
+  };
+  const parent = window && !window.isDestroyed() ? window : undefined;
+  const {canceled, filePaths} = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  if (canceled || !filePaths.length) return null;
+  return ensurePngCover({file: filePaths[0], coversDirectory: path.join(dataDir, 'covers'), convert: convertCoverImage});
+}
+
 async function refreshDisplay(force = false) {
   if (!force && (Date.now() < nextDisplayRefresh || !window?.isVisible())) return;
   nextDisplayRefresh = Date.now() + 8000;
@@ -207,7 +227,8 @@ function registerIpc() {
     getApplications: host.getApplications,
     saveApplication: host.saveApplication,
     deleteApplication: host.deleteApplication,
-    openLogs
+    openLogs,
+    pickCoverImage: async value => pickCoverImage(value)
   };
   for (const [name, action] of Object.entries(actions)) {
     ipcMain.handle(`side-lantern:${name}`, (event, input) => {

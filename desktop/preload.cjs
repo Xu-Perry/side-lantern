@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('sideLantern', {
   saveApplication: input => invoke('saveApplication', input),
   deleteApplication: input => invoke('deleteApplication', input),
   openLogs: () => invoke('openLogs'),
+  pickCoverImage: current => invoke('pickCoverImage', current),
   onState(callback) {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('side-lantern:state', listener);

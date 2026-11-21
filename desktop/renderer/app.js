@@ -391,6 +391,22 @@ byId('refresh').addEventListener('click', () => run(() => api.getState()));
 byId('dismiss-notice').addEventListener('click', () => showError(''));
 byId('refresh-apps').addEventListener('click', refreshApplications);
 byId('add-stream-app').addEventListener('click', () => openApplication());
+byId('stream-app-image-browse').addEventListener('click', async () => {
+  if (!api || busy) return;
+  const button = byId('stream-app-image-browse');
+  button.disabled = true;
+  try {
+    const chosen = await api.pickCoverImage(applicationFields.imagePath.value);
+    if (chosen) {
+      applicationFields.imagePath.value = chosen;
+      setStatusMessage('stream-app-feedback', '');
+    }
+  } catch (error) {
+    setStatusMessage('stream-app-feedback', errorText(error));
+  } finally {
+    button.disabled = false;
+  }
+});
 applicationDialog.addEventListener('close', () => { editingApplication = undefined; });
 byId('stream-app-form').addEventListener('submit', async (event) => {
   event.preventDefault();
