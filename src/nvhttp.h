@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -407,13 +408,15 @@ namespace nvhttp {
      * @param private_key_file Path to the matching private key PEM file.
      * @param handler_scope Receives the scope runner that prevents destruction during callbacks.
      * @param report_verified_client Whether to use production pairing authorization and expose the current test peer's UUID.
+     * @param file_transfer_settings Temporary Windows file transfer settings for protocol tests, if provided.
      * @return HTTPS server ready for test endpoint configuration.
      */
     std::unique_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> make_https_server(
       const std::string &certificate_file,
       const std::string &private_key_file,
       std::shared_ptr<SimpleWeb::ScopeRunner> &handler_scope,
-      bool report_verified_client = false
+      bool report_verified_client = false,
+      const std::filesystem::path &file_transfer_settings = {}
     );
 
     /**

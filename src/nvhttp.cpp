@@ -30,6 +30,9 @@
 // local includes
 #include "config.h"
 #include "display_device.h"
+#ifdef _WIN32
+  #include "file_transfer.h"
+#endif
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -51,6 +54,7 @@ using namespace std::literals;
 namespace nvhttp {
 
   static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Probably, control flow got interrupted by an unexpected C++ exception. This is a bug in Sunshine. Moonlight-qt will report Malformed XML (missing root element)."sv;
+  static constexpr std::size_t GAMESTREAM_REQUEST_BUFFER_SIZE = 64 * 1024;  ///< Bound the buffered HTTP headers and control request bodies.
 
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
@@ -80,6 +84,7 @@ namespace nvhttp {
      */
     SunshineHTTPSServer(const std::string &certification_file, const std::string &private_key_file):
         ServerBase<SunshineHTTPS>::ServerBase(443) {
+      config.max_request_streambuf_size = GAMESTREAM_REQUEST_BUFFER_SIZE;
       // Disabling TLS 1.0 and 1.1 (see RFC 8996)
       context.set_options(boost::asio::ssl::context::no_tlsv1);
       context.set_options(boost::asio::ssl::context::no_tlsv1_1);
@@ -1942,6 +1947,51 @@ namespace nvhttp {
         [](bool &, const resp_https_t &response, const req_https_t &request, const named_cert_t &client) { manual_video(response, request, client, true); }
       );
     }
+
+#ifdef _WIN32
+    /** @brief Access the local file transfer service for the engine process. */
+    const std::shared_ptr<file_transfer::service> &local_file_transfers() {
+      static const auto transfers = std::make_shared<file_transfer::service>(platf::appdata() / "file-transfer.json");
+      return transfers;
+    }
+
+    /** @brief Write an authorization failure for the file transfer protocol. */
+    void deny_file_transfer(const resp_https_t &response) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized, R"({"error":"device_not_paired"})", {
+        {"Content-Type", "application/json"}, {"Cache-Control", "no-store"}
+      });
+      response->close_connection_after_response = true;
+    }
+
+    /** @brief Map paired HTTPS requests to the independent file transfer service. */
+    void register_file_routes(https_server_t &server, const std::shared_ptr<file_transfer::service> &transfers) {
+      using file_transfer::operation;
+      const auto route = [&server, &transfers](const char *path, const char *method, operation action) {
+        server.resource[path][method] = [&server, transfers, action](const resp_https_t &resp, const req_https_t &req) {
+          const auto client = authenticated_request_client(server, *req);
+          if (!client) {
+            deny_file_transfer(resp);
+            return;
+          }
+          const auto args = req->parse_query_string();
+          const auto type = req->header.find("Content-Type");
+          const auto body = action == operation::create_upload || action == operation::append_upload ? req->content.string() : std::string {};
+          const auto result = transfers->execute(client->uuid, action, file_transfer::query_t {args.begin(), args.end()},
+                                                 type != req->header.end() ? std::string_view {type->second} : std::string_view {}, body);
+          resp->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body,
+                      SimpleWeb::CaseInsensitiveMultimap {result.headers.begin(), result.headers.end()});
+        };
+      };
+      route("^/sidelantern/v1/files$", "GET", operation::capabilities);
+      route("^/sidelantern/v1/files/list$", "GET", operation::list);
+      route("^/sidelantern/v1/files/download$", "GET", operation::download);
+      route("^/sidelantern/v1/files/uploads$", "POST", operation::create_upload);
+      route("^/sidelantern/v1/files/uploads$", "GET", operation::get_upload);
+      route("^/sidelantern/v1/files/uploads$", "PUT", operation::append_upload);
+      route("^/sidelantern/v1/files/uploads/complete$", "POST", operation::complete_upload);
+      route("^/sidelantern/v1/files/uploads$", "DELETE", operation::cancel_upload);
+    }
+#endif
   }  // namespace
 
   /**
@@ -2026,6 +2076,12 @@ namespace nvhttp {
     https_server.verify = verify_https_peer;
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
+#ifdef _WIN32
+      if (req->path == "/sidelantern/v1/files" || req->path.starts_with("/sidelantern/v1/files/")) {
+        deny_file_transfer(resp);
+        return;
+      }
+#endif
       pt::ptree tree;
       auto g = util::fail_guard([&tree, &resp]() {
         std::ostringstream data;
@@ -2048,6 +2104,9 @@ namespace nvhttp {
     https_server.resource["^/applist$"]["GET"] = applist;
     https_server.resource["^/appasset$"]["GET"] = appasset;
     register_stream_routes(https_server);
+#ifdef _WIN32
+    register_file_routes(https_server, local_file_transfers());
+#endif
     https_server.resource["^/cancel$"]["GET"] = cancel;
 
     https_server.config.reuse_address = true;
@@ -2095,6 +2154,11 @@ namespace nvhttp {
 
   void erase_all_clients() {
     std::lock_guard lock {client_auth_mutex()};
+#ifdef _WIN32
+    for (const auto &client : client_root.named_devices) {
+      local_file_transfers()->revoke(client.uuid);
+    }
+#endif
     client_root = {};
     cert_chain.clear();
     save_state();
@@ -2114,6 +2178,11 @@ namespace nvhttp {
 
     rebuild_client_cert_chain();
     save_state();
+#ifdef _WIN32
+    if (removed) {
+      local_file_transfers()->revoke(uuid);
+    }
+#endif
     return removed;
   }
 
@@ -2124,6 +2193,11 @@ namespace nvhttp {
         named_cert.enabled = enabled;
         rebuild_client_cert_chain();
         save_state();
+#ifdef _WIN32
+        if (!enabled) {
+          local_file_transfers()->revoke(uuid);
+        }
+#endif
         return true;
       }
     }
@@ -2149,7 +2223,8 @@ namespace nvhttp {
       const std::string &certificate_file,
       const std::string &private_key_file,
       std::shared_ptr<SimpleWeb::ScopeRunner> &handler_scope,
-      bool report_verified_client
+      bool report_verified_client,
+      [[maybe_unused]] const std::filesystem::path &file_transfer_settings
     ) {
       /**
        * @brief Expose the production HTTPS handler scope to lifetime regression tests.
@@ -2168,6 +2243,11 @@ namespace nvhttp {
           response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         };
         register_stream_routes(*server);
+#ifdef _WIN32
+        if (!file_transfer_settings.empty()) {
+          register_file_routes(*server, std::make_shared<file_transfer::service>(file_transfer_settings));
+        }
+#endif
         server->resource["^/test-verified-client$"]["GET"] = [server = server.get()](const auto &response, const auto &request) {
           if (const auto client = authenticated_request_client(*server, *request)) {
             response->write(client->uuid);

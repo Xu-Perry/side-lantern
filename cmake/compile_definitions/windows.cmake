@@ -63,6 +63,10 @@ set_target_properties(sunshine_rc_object PROPERTIES
 )
 
 set(PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/file_transfer.h"
+        "${CMAKE_SOURCE_DIR}/src/file_transfer.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/file_transfer_fs.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/file_transfer_fs.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"

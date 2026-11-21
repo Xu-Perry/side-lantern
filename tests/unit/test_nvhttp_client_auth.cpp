@@ -11,11 +11,16 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
 // lib includes
+#include <boost/asio/error.hpp>
+#include <boost/asio/ssl/error.hpp>
+#include <boost/system/system_error.hpp>
+#include <nlohmann/json.hpp>
 #include <Simple-Web-Server/client_https.hpp>
 
 // local includes
@@ -126,8 +131,15 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   std::ofstream {directory / "second.key"} << second_credentials.pkey;
 
   std::shared_ptr<SimpleWeb::ScopeRunner> scope;
+  fs::path file_transfer_settings;
+#ifdef _WIN32
+  file_transfer_settings = directory / "file-transfer.json";
+  std::ofstream {file_transfer_settings} << nlohmann::json {
+    {"inbox", directory.generic_string()}, {"devices", nlohmann::json::array({first_id, second_id})}
+  };
+#endif
   auto server = nvhttp::test_support::make_https_server(
-    (directory / "host.cert").string(), (directory / "host.key").string(), scope, true
+    (directory / "host.cert").string(), (directory / "host.key").string(), scope, true, file_transfer_settings
   );
   server->io_service = std::make_shared<boost::asio::io_context>();
   server->config.address = "127.0.0.1";
@@ -146,9 +158,43 @@ TEST_F(ClientAuthorizationTest, InterleavedHttpsRequestsUseTheirOwnPairedIdentit
   first.config.timeout = first.config.timeout_connect = 2;
   second.config.timeout = second.config.timeout_connect = 2;
   EXPECT_EQ(first.request("GET", "/test-verified-client")->content.string(), first_id);
+#ifdef _WIN32
+  constexpr auto upload_path = "/sidelantern/v1/files/uploads";
+  const auto files = first.request("GET", "/sidelantern/v1/files");
+  ASSERT_EQ(files->status_code, "200 OK");
+  EXPECT_EQ(nlohmann::json::parse(files->content.string()).at("upload"), true);
+  const auto file_name = "tls-test-" + first_id + ".bin";
+  const auto upload = first.request("POST", upload_path, nlohmann::json {{"name", file_name}, {"size", 2}}.dump(),
+                                    {{"Content-Type", "application/json"}});
+  ASSERT_EQ(upload->status_code, "201 Created");
+  const auto id = nlohmann::json::parse(upload->content.string()).at("id").get<std::string>();
+  const auto owned_path = std::string(upload_path) + "?id=" + id;
+  EXPECT_EQ(second.request("GET", owned_path)->status_code, "404 Not Found");
+  const auto bytes = std::string("x\0", 2);
+  EXPECT_EQ(first.request("PUT", owned_path + "&offset=0", bytes, {{"Content-Type", "application/octet-stream"}})->status_code, "200 OK");
+  EXPECT_EQ(first.request("POST", std::string(upload_path) + "/complete?id=" + id)->status_code, "200 OK");
+  std::ifstream file {directory / file_name, std::ios::binary};
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(file), {}), bytes);
+#endif
   EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
   EXPECT_EQ(first.request("GET", "/test-verified-client")->content.string(), first_id);
+  {
+    SimpleWeb::Client<SimpleWeb::HTTPS> upload {address, false, (directory / "second.cert").string(), (directory / "second.key").string()};
+    upload.config.timeout = upload.config.timeout_connect = 2;
+    // An oversized Content-Length must be rejected before the client sends its body.
+    const SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Length", "65537"}, {"Expect", "100-continue"}};
+    try {
+      const auto oversized = upload.request("POST", "/sidelantern/v1/manual-video", std::string {}, headers);
+      EXPECT_TRUE(oversized->status_code.starts_with("413 "));
+    } catch (const boost::system::system_error &error) {
+      // The HTTP library can close the socket before flushing the oversize response.
+      EXPECT_TRUE(error.code() == boost::asio::error::eof || error.code() == boost::asio::ssl::error::stream_truncated) << error.what();
+    }
+  }
   ASSERT_TRUE(nvhttp::unpair_client(first_id));
+#ifdef _WIN32
+  EXPECT_EQ(first.request("GET", "/sidelantern/v1/files")->status_code, "401 Unauthorized");
+#endif
   EXPECT_EQ(first.request("GET", "/test-verified-client")->status_code, "401 Unauthorized");
   EXPECT_EQ(second.request("GET", "/test-verified-client")->content.string(), second_id);
 
