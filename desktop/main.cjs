@@ -204,6 +204,9 @@ function registerIpc() {
     approvePairing: async value => {await host.approvePairing(value); return state();},
     cancelPairing: async id => {await host.cancelPairing(id); return state();},
     unpair: async id => {await host.unpair(id); return state();},
+    getApplications: host.getApplications,
+    saveApplication: host.saveApplication,
+    deleteApplication: host.deleteApplication,
     openLogs
   };
   for (const [name, action] of Object.entries(actions)) {
@@ -321,6 +324,21 @@ async function boot() {
     const restored = await window.webContents.executeJavaScript('window.sideLantern.getState()');
     if (restored.phase !== 'running' || restored.preferences.language !== 'en') {
       throw new Error('The reopened window did not recover the host state.');
+    }
+    if (!installed) {
+      const success = await window.webContents.executeJavaScript(`(async () => {
+        document.querySelector('[data-page="apps"]').click();
+        if (document.querySelector('[data-panel="apps"]').hidden) return false;
+        const api = window.sideLantern;
+        const app = {index: -1, name: 'SideLantern smoke ${process.pid}', command: '', workingDirectory: '', imagePath: ''};
+        await api.saveApplication(app);
+        const created = (await api.getApplications()).find(item => item.name === app.name);
+        await api.saveApplication({...created, name: app.name + ' edited'});
+        const edited = (await api.getApplications()).find(item => item.name === app.name + ' edited');
+        await api.deleteApplication(edited);
+        return (await api.getApplications()).every(item => !item.name.startsWith(app.name));
+      })()`);
+      if (!success) throw new Error('Streaming app changes did not round-trip through the management API.');
     }
     console.log(`SideLantern smoke passed: renderer release and restore, theme, language, authenticated API, private host on port ${port}.`);
     if (!process.argv.includes('--smoke-hold')) await requestQuit();

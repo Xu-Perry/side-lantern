@@ -6,7 +6,7 @@ const { normalizeLanguage, translate } = window.sideLanternI18n;
 const byId = (id) => ui.getElementById(id);
 const panels = [...ui.querySelectorAll('[data-panel]')];
 const navButtons = [...ui.querySelectorAll('[data-page]')];
-const titles = { host: 'streamingHost', stream: 'streamingSettings', display: 'virtualDisplay' };
+const titles = { host: 'streamingHost', apps: 'streamingApps', stream: 'streamingSettings', display: 'virtualDisplay' };
 const phaseLabels = {
   stopped: 'serviceStopped',
   starting: 'serviceStarting',
@@ -20,6 +20,13 @@ const listData = new WeakMap();
 const pairDialog = byId('pair-dialog');
 const preferencesDialog = byId('preferences-dialog');
 const confirmDialog = byId('confirm-dialog');
+const applicationDialog = byId('stream-app-dialog');
+const applicationFields = {
+  name: byId('stream-app-name'),
+  command: byId('stream-app-command'),
+  workingDirectory: byId('stream-app-directory'),
+  imagePath: byId('stream-app-image')
+};
 const fields = byId('stream-form').elements;
 
 let state;
@@ -32,6 +39,10 @@ let confirmation;
 let currentPage = 'host';
 let language;
 let pendingLanguage;
+let applications = null;
+let applicationsLoading = false;
+let applicationsError = '';
+let editingApplication;
 
 function t(key, values) {
   return translate(language, key, values);
@@ -191,6 +202,65 @@ function renderStream(snapshot) {
     : streamApplied ? 'settingsApplied' : 'settingsApplyOnSave'));
 }
 
+function renderApplications() {
+  const running = state?.phase === 'running';
+  const items = running ? applications ?? [] : [];
+  const canEdit = running && !busy && !applicationsLoading && !applicationsError && applications !== null;
+  byId('refresh-apps').disabled = !running || busy || applicationsLoading;
+  byId('add-stream-app').disabled = !canEdit;
+  byId('save-stream-app').disabled = !running || busy;
+  if (editingApplication) setText('stream-app-heading', t(editingApplication.index === -1 ? 'addStreamApp' : 'editStreamApp'));
+  const status = !running ? t('startServiceToReadApps') : applicationsLoading ? t('loadingApps')
+    : applicationsError || (applications === null ? t('loadingApps') : items.length ? '' : t('noStreamApps'));
+  setStatusMessage('app-list-status', status);
+  renderList('stream-app-list', items.map(app => ({...app, canEdit})), (app) => {
+    const item = row(app.name, app.command || t('noLaunchCommand'));
+    const actions = ui.createElement('div');
+    actions.className = 'inline-controls';
+    actions.append(
+      itemButton(t('editApp'), () => openApplication(app), {disabled: !app.canEdit}),
+      itemButton(t('deleteApp'), () => ask({
+        title: 'deleteStreamAppTitle',
+        detail: 'deleteStreamAppDetail',
+        values: {app: app.name},
+        label: 'deleteApp',
+        command: async () => {
+          if (await run(() => api.deleteApplication({index: app.index, revision: app.revision}))) {
+            await refreshApplications();
+          }
+        }
+      }), {danger: true, disabled: !app.canEdit})
+    );
+    item.append(actions);
+    return item;
+  });
+}
+
+async function refreshApplications() {
+  if (state?.phase !== 'running' || applicationsLoading) return;
+  applicationsLoading = true;
+  applicationsError = '';
+  renderApplications();
+  try {
+    applications = await api.getApplications();
+  } catch (error) {
+    applicationsError = errorText(error);
+  } finally {
+    applicationsLoading = false;
+    renderApplications();
+  }
+}
+
+function openApplication(app = {index: -1}) {
+  if (state?.phase !== 'running' || busy) return;
+  editingApplication = {index: app.index, revision: app.revision};
+  for (const [name, field] of Object.entries(applicationFields)) field.value = app[name] ?? '';
+  setStatusMessage('stream-app-feedback', '');
+  renderApplications();
+  applicationDialog.showModal();
+  applicationFields.name.focus();
+}
+
 function renderDisplay(snapshot) {
   const display = snapshot.display;
   setText('display-title', t(display?.enabled ? 'displayExtended'
@@ -223,6 +293,7 @@ function render() {
   byId('refresh').disabled = busy;
   if (!state) return;
   renderHost(state);
+  renderApplications();
   renderStream(state);
   renderDisplay(state);
   renderPreferences(state);
@@ -232,8 +303,14 @@ function render() {
 
 function receiveState(next) {
   if (!next) return;
+  const phaseChanged = state?.phase !== next.phase;
   state = next;
+  if (phaseChanged) {
+    applications = null;
+    applicationsError = '';
+  }
   render();
+  if (phaseChanged && currentPage === 'apps') void refreshApplications();
 }
 
 async function run(command, report = showError) {
@@ -295,6 +372,7 @@ for (const button of navButtons) {
     button.setAttribute('aria-current', 'page');
     for (const panel of panels) panel.hidden = panel.dataset.panel !== currentPage;
     setText('breadcrumb', t(titles[currentPage]));
+    if (currentPage === 'apps') void refreshApplications();
   });
 }
 
@@ -311,6 +389,19 @@ confirmDialog.addEventListener('close', () => { confirmation = undefined; });
 
 byId('refresh').addEventListener('click', () => run(() => api.getState()));
 byId('dismiss-notice').addEventListener('click', () => showError(''));
+byId('refresh-apps').addEventListener('click', refreshApplications);
+byId('add-stream-app').addEventListener('click', () => openApplication());
+applicationDialog.addEventListener('close', () => { editingApplication = undefined; });
+byId('stream-app-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!editingApplication || state?.phase !== 'running') return;
+  const changes = {...editingApplication};
+  for (const [name, field] of Object.entries(applicationFields)) changes[name] = field.value;
+  if (await run(() => api.saveApplication(changes), message => setStatusMessage('stream-app-feedback', message))) {
+    if (applicationDialog.open) applicationDialog.close();
+    await refreshApplications();
+  }
+});
 
 byId('service-toggle').addEventListener('click', () => {
   if (!state || busy) return;

@@ -75,6 +75,40 @@ test('writes owned settings without metadata or losing advanced configuration', 
   });
 });
 
+test('manages stream applications by index and preserves advanced settings on edit', async (t) => {
+  const imported = {
+    name: 'Steam', cmd: 'steam://open/bigpicture', 'prep-cmd': [{ undo: 'steam://close/bigpicture' }],
+    'auto-detach': true, 'working-dir': 'C:\\Games', 'image-path': 'steam.png',
+  };
+  const { client, requests } = await fixture(t, ({ method }) =>
+    [200, method === 'GET' ? { apps: [{ name: 'Desktop' }, imported] } : { status: true }]);
+  const [desktop, steam] = await client.getApplications();
+  assert.equal(desktop.name, 'Desktop');
+  assert.equal(steam.command, imported.cmd);
+
+  await client.saveApplication({ ...steam, name: 'Steam TV', workingDirectory: '' });
+  assert.deepEqual(requests.at(-1).body, {
+    ...imported, index: 1, name: 'Steam TV', 'working-dir': null,
+  });
+  await client.saveApplication({ index: -1, name: 'New desktop', command: '', workingDirectory: '', imagePath: '' });
+  assert.deepEqual(requests.at(-1).body, {
+    index: -1, name: 'New desktop', cmd: null, 'working-dir': null, 'image-path': null,
+  });
+  await client.deleteApplication(desktop);
+  assert.equal(requests.at(-1).method, 'DELETE');
+  assert.equal(requests.at(-1).url, '/api/apps/0');
+});
+
+test('rejects edits and deletions if an application changed before saving', async (t) => {
+  let apps = [{ name: 'Desktop' }];
+  const { client, requests } = await fixture(t, () => [200, { apps }]);
+  const [app] = await client.getApplications();
+  apps = [{ name: 'Different application' }];
+  await assert.rejects(client.saveApplication({ ...app, name: 'New name' }), /已变更/);
+  await assert.rejects(client.deleteApplication(app), /已变更/);
+  assert.ok(requests.every(request => request.method === 'GET'));
+});
+
 test('handles scoped pairing, device UUIDs and unsuccessful actions', async (t) => {
   const { client, requests } = await fixture(t, ({ method, url }) => {
     if (url === '/api/clients/list') return [200, {status: true, named_certs: [

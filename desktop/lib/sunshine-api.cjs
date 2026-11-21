@@ -1,4 +1,4 @@
-const { X509Certificate } = require('node:crypto');
+const { createHash, X509Certificate } = require('node:crypto');
 const https = require('node:https');
 
 const LOOPBACK = '127.0.0.1';
@@ -13,6 +13,11 @@ const PAIRING_ID = /^[a-f0-9]{32}$/i;
 const DEVICE_UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const DISPLAY_ID = /^\{[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\}$/i;
 const CONFIG_METADATA = new Set(['status', 'version', 'platform']);
+const APP_FIELDS = {
+  command: 'cmd',
+  workingDirectory: 'working-dir',
+  imagePath: 'image-path',
+};
 
 class SunshineResponseError extends Error {
   constructor(statusCode) {
@@ -141,6 +146,10 @@ function validIdentifier(value, expression) {
   return typeof value === 'string' && expression.test(value);
 }
 
+function applicationRevision(app) {
+  return createHash('sha256').update(JSON.stringify(app)).digest('hex');
+}
+
 function createSunshineClient({ port, username, password, certificate }) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new RangeError('Sunshine 管理端口无效。');
@@ -168,6 +177,25 @@ function createSunshineClient({ port, username, password, certificate }) {
     return config;
   }
 
+  async function readApps() {
+    const result = await read('/api/apps');
+    if (!Array.isArray(result.apps) || result.apps.some(app => typeof app?.name !== 'string')) {
+      throw new Error('Sunshine 返回了无效的串流应用列表。');
+    }
+    return result.apps;
+  }
+
+  async function currentApplication({index, revision} = {}) {
+    if (!Number.isSafeInteger(index) || index < 0 || !validIdentifier(revision, /^[a-f0-9]{64}$/)) {
+      throw new TypeError('串流应用标识无效。');
+    }
+    const app = (await readApps())[index];
+    if (!app || applicationRevision(app) !== revision) {
+      throw new Error('串流应用列表已变更，请刷新后再试。');
+    }
+    return app;
+  }
+
   return {
     async ping() {
       const result = await requestJson(endpoint, { path: '/api/configLocale', authorized: false });
@@ -177,6 +205,37 @@ function createSunshineClient({ port, username, password, certificate }) {
 
     async getSettings() {
       return readSettings(await getConfig());
+    },
+
+    async getApplications() {
+      return (await readApps()).map((app, index) => ({
+        index,
+        revision: applicationRevision(app),
+        name: app.name,
+        ...Object.fromEntries(Object.entries(APP_FIELDS).map(([key, field]) =>
+          [key, typeof app[field] === 'string' ? app[field] : ''])),
+      }));
+    },
+
+    async saveApplication(input) {
+      if (typeof input?.name !== 'string' || !input.name.trim() || input.name.includes('\0')) {
+        throw new TypeError('请输入串流应用名称。');
+      }
+      const fields = {};
+      for (const [key, field] of Object.entries(APP_FIELDS)) {
+        const value = input[key];
+        if (typeof value !== 'string' || value.includes('\0')) throw new TypeError('串流应用设置无效。');
+        fields[field] = value.trim() ? value : null;
+      }
+      const previous = input.index === -1 ? {} : await currentApplication(input);
+      const result = await write('/api/apps', 'POST', {...previous, ...fields, name: input.name.trim(), index: input.index});
+      requireSuccess(result, '无法保存串流应用。');
+    },
+
+    async deleteApplication(input) {
+      await currentApplication(input);
+      const result = await write(`/api/apps/${input.index}`, 'DELETE');
+      requireSuccess(result, '无法删除串流应用。');
     },
 
     async saveSettings(settings, outputId) {

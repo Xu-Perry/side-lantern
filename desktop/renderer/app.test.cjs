@@ -22,7 +22,7 @@ function createElement() {
   };
 }
 
-function mount(initialState, approvePairing, setPreferences) {
+function mount(initialState, approvePairing, setPreferences, applicationBridge) {
   const elements = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, createElement());
@@ -36,9 +36,10 @@ function mount(initialState, approvePairing, setPreferences) {
     async getState() { return initialState; },
     onState(callback) { update = callback; return () => {}; },
     approvePairing,
-    setPreferences
+    setPreferences,
+    ...applicationBridge
   };
-  const pages = ['host', 'stream', 'display'];
+  const pages = ['host', 'apps', 'stream', 'display'];
   const nav = pages.map((page) => ({ ...createElement(), dataset: { page } }));
   const sections = pages.map((panel) => ({ ...createElement(), dataset: { panel }, hidden: panel !== 'host' }));
   const staticLabel = { ...createElement(), dataset: { i18n: 'appSettings' } };
@@ -86,6 +87,37 @@ test('the workspace header leaves window actions to the native chrome', () => {
   assert.doesNotMatch(header, /最小化到托盘|退出/);
 });
 
+test('opens the streaming apps tab and saves an edited application', async () => {
+  const writes = [];
+  let apps = [{ index: 0, revision: 'existing', name: 'Desktop', command: '', workingDirectory: '', imagePath: '' }];
+  let reads = 0;
+  const renderer = mount(getState(), undefined, undefined, {
+    async getApplications() {
+      reads++;
+      return apps;
+    },
+    async saveApplication(changes) {
+      writes.push(changes);
+      apps = [{ ...changes }];
+    }
+  });
+  await nextTurn();
+  assert.equal(reads, 0);
+  renderer.nav.find(button => button.dataset.page === 'apps').handlers.get('click')();
+  await nextTurn();
+  assert.equal(reads, 1);
+  assert.equal(renderer.sections.find(panel => panel.dataset.panel === 'apps').hidden, false);
+  const [row] = renderer.element('stream-app-list').children;
+  row.children[1].children[0].handlers.get('click')();
+  assert.equal(renderer.element('stream-app-dialog').open, true);
+  renderer.element('stream-app-name').value = 'Living room';
+  await renderer.element('stream-app-form').handlers.get('submit')(submit);
+  assert.equal(renderer.element('stream-app-dialog').open, false);
+  assert.equal(writes[0].name, 'Living room');
+  assert.equal(writes[0].revision, 'existing');
+  assert.equal(reads, 2);
+});
+
 test('legacy PIN flows stay manual and pass a null request ID', async () => {
   const state = getState({ legacyPairing: true });
   const approvals = [];
@@ -129,7 +161,7 @@ test('changing language immediately translates the existing page and preserves d
   });
   await nextTurn();
   assert.equal(renderer.element('language').value, 'zh-CN');
-  renderer.nav[1].handlers.get('click')();
+  renderer.nav.find(button => button.dataset.page === 'stream').handlers.get('click')();
   const fields = renderer.element('stream-form').elements;
   fields.maxBitrateMbps.value = '35';
   renderer.element('stream-form').handlers.get('input')();
@@ -140,7 +172,7 @@ test('changing language immediately translates the existing page and preserves d
   assert.equal(renderer.element('breadcrumb').textContent, 'Streaming settings');
   assert.equal(renderer.staticLabel.textContent, 'App settings');
   assert.equal(renderer.element('host-phase').textContent, 'Service running');
-  assert.equal(renderer.sections[1].hidden, false);
+  assert.equal(renderer.sections.find(panel => panel.dataset.panel === 'stream').hidden, false);
   assert.equal(renderer.element('preferences-dialog').open, true);
   assert.equal(fields.maxBitrateMbps.value, '35');
   assert.deepEqual(calls, [{ theme: 'system', launchAtLogin: false, language: 'en' }]);

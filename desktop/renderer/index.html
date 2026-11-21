@@ -15,6 +15,7 @@
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>SideLantern</strong></div>
       <nav class="navigation" aria-label="主导航" data-i18n-label="navigation">
         <button type="button" class="nav-button" data-page="host" aria-current="page"><span class="nav-icon monitor" aria-hidden="true"></span><span data-i18n="streamingHost">串流主机</span></button>
+        <button type="button" class="nav-button" data-page="apps"><span class="nav-icon apps" aria-hidden="true"></span><span data-i18n="streamingApps">串流应用</span></button>
         <button type="button" class="nav-button" data-page="stream"><span class="nav-icon sliders" aria-hidden="true">≡</span><span data-i18n="streamingSettings">串流设置</span></button>
         <button type="button" class="nav-button" data-page="display"><span class="nav-icon display" aria-hidden="true"></span><span data-i18n="virtualDisplay">虚拟显示器</span></button>
       </nav>
@@ -68,6 +69,21 @@
             <ul class="item-list" id="devices" hidden></ul>
             <p class="card-footnote" id="device-cache" hidden data-i18n="cachedDevices">服务已停止。显示最近读取的配对记录。</p>
           </section>
+        </section>
+
+        <section data-panel="apps" aria-labelledby="apps-heading" hidden>
+          <header class="page-heading">
+            <h1 id="apps-heading" data-i18n="streamingApps">串流应用</h1>
+            <div class="inline-controls">
+              <button type="button" class="button" id="refresh-apps" disabled data-i18n="refreshApps">刷新列表</button>
+              <button type="button" class="button primary" id="add-stream-app" disabled data-i18n="addStreamApp">新增应用</button>
+            </div>
+          </header>
+          <p class="page-intro" data-i18n="streamingAppsIntro">管理 Moonlight 连接此主机时看到的应用。</p>
+          <div class="card">
+            <p class="empty-text" id="app-list-status" role="status" data-i18n="startServiceToReadApps">启动服务后可管理串流应用。</p>
+            <ul class="item-list" id="stream-app-list" hidden></ul>
+          </div>
         </section>
 
         <section data-panel="stream" hidden>
@@ -160,6 +176,23 @@
       <label class="field-label"><span data-i18n="pairingCode">四位配对码</span><input id="pair-pin" name="pin" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]{4}" maxlength="4" required placeholder="0000"></label>
       <p class="inline-message error" id="pair-feedback" role="alert" hidden></p>
       <div class="dialog-actions"><button type="button" class="button" data-close data-i18n="back">返回</button><button type="submit" class="button primary" id="approve-pin" data-i18n="confirmPairing">确认配对</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="stream-app-dialog" aria-labelledby="stream-app-heading">
+    <header class="dialog-heading"><h2 id="stream-app-heading"></h2><button type="button" class="text-button" data-close data-i18n="close">关闭</button></header>
+    <form id="stream-app-form">
+      <div class="app-fields">
+        <label><span data-i18n="streamAppName">应用名称</span><input type="text" id="stream-app-name" required></label>
+        <label><span data-i18n="streamAppCommand">启动命令</span><input type="text" id="stream-app-command" aria-describedby="stream-app-command-help"><small id="stream-app-command-help" class="muted" data-i18n="streamAppCommandHelp">留空时无需启动应用即可串流。</small></label>
+        <label><span data-i18n="streamAppDirectory">工作目录</span><input type="text" id="stream-app-directory"></label>
+        <label><span data-i18n="streamAppImage">封面路径</span><input type="text" id="stream-app-image"></label>
+      </div>
+      <p class="host-error notice" id="stream-app-feedback" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-close data-i18n="back">返回</button>
+        <button type="submit" class="button primary" id="save-stream-app" data-i18n="saveStreamApp">保存应用</button>
+      </div>
     </form>
   </dialog>
 

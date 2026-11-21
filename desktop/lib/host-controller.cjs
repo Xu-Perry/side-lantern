@@ -98,6 +98,9 @@ function createHostController({open, onChange = () => {}}) {
     start: () => schedule(start),
     stop: () => schedule(stop),
     getDisplays: () => current?.client.getDisplays?.(),
+    getApplications: () => schedule(() => withClient(client => client.getApplications())),
+    saveApplication: input => schedule(() => withClient(client => client.saveApplication(input))),
+    deleteApplication: input => schedule(() => withClient(client => client.deleteApplication(input))),
     saveSettings: (settings, outputId) => schedule(async () => {
       if (outputId !== undefined) {
         const sessions = await withClient(client => client.getSessions());

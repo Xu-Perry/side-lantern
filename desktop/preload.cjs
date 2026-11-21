@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('sideLantern', {
   approvePairing: value => invoke('approvePairing', value),
   cancelPairing: id => invoke('cancelPairing', id),
   unpair: id => invoke('unpair', id),
+  getApplications: () => invoke('getApplications'),
+  saveApplication: input => invoke('saveApplication', input),
+  deleteApplication: input => invoke('deleteApplication', input),
   openLogs: () => invoke('openLogs'),
   onState(callback) {
     const listener = (_event, state) => callback(state);
