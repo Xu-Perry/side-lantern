@@ -56,6 +56,16 @@ namespace file_transfer::storage {
   std::vector<std::filesystem::path> local_drive_roots();
 
   /**
+   * @brief Return the signed-in user's configured Windows Downloads folder.
+   *
+   * The folder may be redirected to another volume. It is only reported when the
+   * path is absolute and currently exists as a directory.
+   *
+   * @return Absolute path, or an empty optional when the folder is unavailable.
+   */
+  std::optional<std::filesystem::path> downloads_directory();
+
+  /**
    * @brief Enumerate children of an authorized Windows directory.
    * @param root Absolute, local path configured by the host.
    * @param relative UTF-8 path beneath the root with slash separators, or empty for the root.

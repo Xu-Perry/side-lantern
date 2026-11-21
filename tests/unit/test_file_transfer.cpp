@@ -10,9 +10,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 
 // lib includes
+#include <Windows.h>
 #include <nlohmann/json.hpp>
+#include <shlobj.h>
 
 // local includes
 #include "src/file_transfer.h"
@@ -64,7 +67,6 @@ TEST(FileTransfer, BrowsesLocalDrivesWithoutAShareConfiguration) {
   ASSERT_EQ(capabilities.status, 200);
   const auto info = json::parse(capabilities.body);
   EXPECT_EQ(info.at("enabled"), true);
-  EXPECT_EQ(info.at("upload"), false);
   const auto root = test.folder.root_name().string();
   const auto id = "drive-" + root.substr(0, 1);
   bool found = false;
@@ -91,6 +93,45 @@ TEST(FileTransfer, BrowsesLocalDrivesWithoutAShareConfiguration) {
   const auto download = test.server.execute("allowed", operation::download, {{"root", id}, {"path", relative + "/share/direct.txt"}});
   ASSERT_EQ(download.status, 200) << download.body;
   EXPECT_EQ(download.body, "from the drive");
+}
+
+TEST(FileTransfer, ReceivesFilesInWindowsDownloadsWithoutAnInboxSetting) {
+  const auto com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  ASSERT_TRUE(SUCCEEDED(com) || com == RPC_E_CHANGED_MODE);
+  const auto uninitialize = util::fail_guard([com] {
+    if (SUCCEEDED(com)) {
+      CoUninitialize();
+    }
+  });
+  PWSTR raw = nullptr;
+  const auto result = SHGetKnownFolderPath(FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr, &raw);
+  const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> downloads {raw, CoTaskMemFree};
+  if (FAILED(result)) {
+    GTEST_SKIP() << "This account has no accessible Windows Downloads folder";
+  }
+  ASSERT_NE(downloads, nullptr);
+
+  fixture test;
+  const auto name = "side-lantern-test-" + uuid_util::uuid_t::generate().string() + ".txt";
+  const auto destination = fs::path {downloads.get()} / name;
+  ASSERT_FALSE(fs::exists(destination));
+  const auto cleanup = util::fail_guard([&] {
+    std::error_code ec;
+    fs::remove(destination, ec);
+  });
+  const auto capabilities = test.server.execute("allowed", operation::capabilities);
+  ASSERT_EQ(capabilities.status, 200);
+  EXPECT_EQ(json::parse(capabilities.body).at("upload"), true);
+  const auto request = json {{"name", name}, {"size", 3}}.dump();
+  const auto created = test.server.execute("allowed", operation::create_upload, {}, "application/json", request);
+  ASSERT_EQ(created.status, 201) << created.body;
+  const auto id = json::parse(created.body).at("id").get<std::string>();
+  std::ofstream {test.settings} << "{}";
+  ASSERT_EQ(test.server.execute("allowed", operation::append_upload, {{"id", id}, {"offset", "0"}}, "application/octet-stream", "abc").status, 200);
+  ASSERT_EQ(test.server.execute("allowed", operation::complete_upload, {{"id", id}}).status, 200);
+  std::ifstream file {destination, std::ios::binary};
+  ASSERT_TRUE(file);
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(file), {}), "abc");
 }
 
 TEST(FileTransfer, PreservesExplicitLegacyRootRestrictions) {

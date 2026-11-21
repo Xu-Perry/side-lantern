@@ -10,10 +10,13 @@
 #include <bit>
 #include <cstddef>
 #include <limits>
+#include <memory>
+#include <system_error>
 #include <utility>
 
 // lib includes
 #include <Windows.h>
+#include <shlobj.h>
 #include <winternl.h>
 
 namespace file_transfer::storage {
@@ -384,6 +387,39 @@ namespace file_transfer::storage {
       }
     }
     return result;
+  }
+
+  std::optional<std::filesystem::path> downloads_directory() {
+    const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    struct com_scope {
+      HRESULT result;  ///< This thread's initialization result, owned by the caller when successful.
+
+      ~com_scope() {
+        if (SUCCEEDED(result)) {
+          CoUninitialize();
+        }
+      }
+    } com {initialized};
+    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) {
+      return std::nullopt;
+    }
+    PWSTR raw = nullptr;
+    const auto result = SHGetKnownFolderPath(FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr, &raw);
+    struct free_path {
+      void operator()(wchar_t *path) const {
+        CoTaskMemFree(path);
+      }
+    };
+    const std::unique_ptr<wchar_t, free_path> path {raw};
+    if (FAILED(result) || !path) {
+      return std::nullopt;
+    }
+    const std::filesystem::path directory {path.get()};
+    std::error_code ec;
+    if (!directory.is_absolute() || !std::filesystem::is_directory(directory, ec)) {
+      return std::nullopt;
+    }
+    return directory;
   }
 
   page list(const std::filesystem::path &root, std::string_view relative, uint64_t offset, size_t limit, const std::filesystem::path &private_directory) {

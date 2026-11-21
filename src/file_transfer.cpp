@@ -129,13 +129,22 @@ namespace file_transfer {
       return path;
     }
 
+    /** @brief Receive uploads in the user's Windows Downloads folder when none is configured. */
+    void apply_default_inbox(settings &config) {
+      if (config.inbox.empty()) {
+        config.inbox = storage::downloads_directory().value_or(fs::path {});
+      }
+    }
+
     /** @brief Load optional file settings. A fresh profile uses automatic local drive browsing. */
     settings read_settings(const fs::path &path) {
+      settings config;
       std::ifstream stream {path, std::ios::binary};
       if (!stream) {
         std::error_code ec;
         if (!fs::exists(path, ec) && !ec) {
-          return {};
+          apply_default_inbox(config);
+          return config;
         }
         throw rejection {503, "invalid_configuration"};
       }
@@ -151,7 +160,6 @@ namespace file_transfer {
         if (!document.is_object()) {
           throw rejection {503, "invalid_configuration"};
         }
-        settings config;
         if (document.contains("devices")) {
           config.devices = document.at("devices").get<std::vector<std::string>>();
         }
@@ -173,6 +181,7 @@ namespace file_transfer {
             }
           }
         }
+        apply_default_inbox(config);
         return config;
       } catch (const json::exception &) {
         throw rejection {503, "invalid_configuration"};
