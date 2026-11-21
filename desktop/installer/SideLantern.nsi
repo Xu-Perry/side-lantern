@@ -194,6 +194,10 @@ Function .onInit
     MessageBox MB_OK|MB_ICONSTOP "An existing SideLantern installation was found. Exit and uninstall it before continuing. User settings are kept." /SD IDOK
     Abort
   ${EndIf}
+  ${If} ${FileExists} "$INSTDIR"
+    MessageBox MB_OK|MB_ICONSTOP "The folder $INSTDIR already exists. Uninstall the previous SideLantern copy or remove the folder, then run Setup again. User settings are kept." /SD IDOK
+    Abort
+  ${EndIf}
   ; Keep elevated preflight code under the system-protected directory.
   System::Call 'kernel32::GetTempFileNameW(w "$PROGRAMFILES64", w "SLN", i 0, w .r0) i .r1'
   ${If} $1 == 0
@@ -271,5 +275,7 @@ Section "Uninstall"
   RMDir "$INSTDIR\resources\vdd-driver"
   Delete "$INSTDIR\Uninstall.exe"
   !insertmacro DeletePayload
-  RMDir "$INSTDIR"
+  ; Remove files the payload list cannot know about, because Setup refuses to
+  ; install into a folder that still exists after a previous uninstall.
+  RMDir /r "$INSTDIR"
 SectionEnd
