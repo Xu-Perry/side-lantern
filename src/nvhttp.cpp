@@ -2071,6 +2071,7 @@ namespace nvhttp {
 
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
     http_server_t http_server;
+    http_server.config.max_request_streambuf_size = GAMESTREAM_REQUEST_BUFFER_SIZE;
 
     // Verify certificates after establishing connection
     https_server.verify = verify_https_peer;

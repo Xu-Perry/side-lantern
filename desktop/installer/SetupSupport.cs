@@ -19,6 +19,7 @@ internal static class SetupSupport
     private const string FirewallGroup = "SideLantern Windows Host";
     private const string TcpRule = "SideLantern-Host-In-TCP";
     private const string UdpRule = "SideLantern-Host-In-UDP";
+    private const int AllNetworkProfiles = 0x7fffffff; // NET_FW_PROFILE2_ALL
     private const string ViGemSha256 = "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a";
 
     private static readonly string InstallPath = Path.GetDirectoryName(Path.GetDirectoryName(typeof(SetupSupport).Assembly.Location));
@@ -153,14 +154,14 @@ internal static class SetupSupport
         dynamic rule = Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FWRule", true));
         rule.Name = name;
         rule.Grouping = FirewallGroup;
-        rule.Description = "Allow SideLantern streaming from the local private network.";
+        rule.Description = "Allow paired SideLantern streaming over local and public networks.";
         rule.ApplicationName = EnginePath;
         rule.Protocol = protocol;
         rule.LocalPorts = ports;
-        rule.RemoteAddresses = "LocalSubnet";
+        rule.RemoteAddresses = "*";
         rule.Direction = 1; // inbound
         rule.Action = 1; // allow
-        rule.Profiles = 2; // private network
+        rule.Profiles = AllNetworkProfiles;
         rule.Enabled = true;
         rules.Add(rule);
     }

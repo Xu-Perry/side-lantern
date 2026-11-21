@@ -57,11 +57,14 @@ unchecked by default. Setup reuses the existing display adapter when found.
   ownership, permissions and redirection because the service runs as LocalSystem.
   Program Files is the default protected location. A different drive is accepted
   if its folder chain also passes these checks.
-- Setup adds SideLantern-only inbound rules on the private network profile for
-  the local subnet. The Windows management endpoint is excluded. The existing
-  `SunshineService`, its firewall rules and its files are outside Setup's
-  ownership. Exit Sunshine yourself when you intend to switch hosts on the
-  default streaming ports.
+- Setup allows inbound LAN and Internet traffic to the SideLantern engine on
+  TCP 47984, 47989, 48010 and UDP 47998–48000, 48002 across Windows network
+  profiles. Pairing is still required for streaming. The management port 47990
+  stays local to the host. With a public IPv4 address on a NAT router, forward
+  the streaming ports to the PC's LAN address. UPnP starts disabled.
+- Setup owns the SideLantern service and firewall rules it creates. Exit
+  Sunshine yourself when you intend to switch hosts on the default streaming
+  ports.
 - Before replacing this candidate, exit SideLantern from the tray, uninstall
   through Windows Apps, and install the new version. Uninstall checks the
   service and firewall ownership, removes only staged program paths and keeps
@@ -78,3 +81,7 @@ unchecked by default. Setup reuses the existing display adapter when found.
   install, default component selection, standard-user start/stop, uninstall
   and reinstall checks on a disposable x64 Windows system before distribution.
   Release signing and distribution verification are separate release steps.
+- To verify the default firewall rules without applying them, compile
+  [SetupFirewallTest.cs](../test/SetupFirewallTest.cs) with the x64 .NET
+  Framework compiler and reference `Microsoft.CSharp.dll`. Run the test with the
+  staged `payload\resources\SetupSupport.exe` as its argument.
