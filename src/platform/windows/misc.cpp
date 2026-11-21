@@ -1038,7 +1038,14 @@ namespace platf {
       free_proc_thread_attr_list(list);
     });
 
-    DWORD creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_BREAKAWAY_FROM_JOB;
+    DWORD creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+
+    // Keep applications in the SideLantern service's lifetime job when it disallows breakaway.
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits {};
+    if (QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation, &job_limits, sizeof(job_limits), nullptr) &&
+        (job_limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK)) {
+      creation_flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
 
     // Create a new console for interactive processes and use no console for non-interactive processes
     creation_flags |= interactive ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;

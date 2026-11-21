@@ -7,14 +7,60 @@
 #include "../tests_common.h"
 
 // standard includes
+#include <cstdlib>
 #include <format>
 #include <string>
 #include <tuple>
 #include <vector>
 
+#ifdef _WIN32
+  // lib includes
+  // Winsock2 must precede Windows.h for the Boost.Process includes below.
+  #include <winsock2.h>
+  #include <Windows.h>
+#endif
+
 // local includes
 #include "src/compat/boost_process.h"
 #include "src/platform/common.h"
+
+#ifdef _WIN32
+/** @brief Exercise application launches in an isolated Windows job. */
+class WindowsExternalCommand: public BaseTest {
+protected:
+  /** @brief Leave stderr available for GoogleTest's subprocess capture. */
+  bool isOutputSuppressed() const override {
+    return false;
+  }
+};
+
+/**
+ * @brief Verify managed applications start when the host is in a job that requires child processes to stay in it.
+ */
+TEST_F(WindowsExternalCommand, StartsGroupedApplicationInsideServiceJob) {
+  EXPECT_EXIT(
+    {
+      // Only the isolated test subprocess joins this job.
+      const auto job = CreateJobObjectW(nullptr, nullptr);
+      if (!job || !AssignProcessToJobObject(job, GetCurrentProcess())) {
+        std::_Exit(2);
+      }
+      const auto env = boost::this_process::environment();
+      boost::filesystem::path directory;
+      boost::process::v1::group application_job;
+      std::error_code ec;
+      auto child = platf::run_command(false, false, "cmd.exe /d /c exit 0", directory, env, nullptr, ec, &application_job);
+      if (ec) {
+        std::_Exit(3);
+      }
+      child.wait(ec);
+      std::_Exit(ec ? 4 : child.exit_code());
+    },
+    ::testing::ExitedWithCode(0),
+    ""
+  );
+}
+#endif
 
 // Test data structure for parameterized testing
 struct ExternalCommandTestData {
@@ -200,15 +246,11 @@ INSTANTIATE_TEST_SUITE_P(
       true,
       "Flatpak installer stops after udev reload failure"
     },
-    // Cross-platform tests with xfail on Windows CI
     ExternalCommandTestData {
       SIMPLE_COMMAND,
       "all",
       true,
-      "Simple command test",
-      "",  // working_directory
-      IS_WINDOWS,  // xfail_condition
-      "Simple command test fails on Windows CI environment"  // xfail_reason
+      "Simple command test"
     },
     // Cross-platform failing test
     ExternalCommandTestData {
