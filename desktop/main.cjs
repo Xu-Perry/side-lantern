@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, nativeImage, nativeTheme, safeStorage, shell, Tray, ipcMain } = require('electron');
 const { execFile } = require('node:child_process');
+const { once } = require('node:events');
 const { mkdirSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -24,6 +25,7 @@ const smoke = process.argv.includes('--smoke-test');
 const execFileAsync = promisify(execFile);
 let preferences = defaultPreferences;
 let window;
+let windowLoading;
 let tray;
 let quitJob;
 let quitAllowed = false;
@@ -68,7 +70,8 @@ function state() {
 }
 
 function publish() {
-  if (window && !window.isDestroyed()) window.webContents.send('side-lantern:state', state());
+  const contents = window?.webContents;
+  if (contents && !contents.isDestroyed()) contents.send('side-lantern:state', state());
 }
 
 async function openPrivateHost() {
@@ -92,7 +95,9 @@ async function openPrivateHost() {
     ? await require('./lib/windows-service.cjs').launchServiceEngine({port})
     : launchEngine(profile, port);
   try {
-    const {client, settings} = await waitForEngine({engine, profile, port, createClient: createSunshineClient});
+    const {client, settings} = await waitForEngine({
+      engine, profile, port, createClient: createSunshineClient, timeout: smoke ? 45000 : undefined
+    });
     return {engine, client, settings, outputId: await client.getOutput()};
   } catch (error) {
     await engine.stop();
@@ -130,11 +135,19 @@ async function setPreferences(patch) {
   return state();
 }
 
-function showWindow() {
-  if (!window || window.isDestroyed()) return;
-  if (window.isMinimized()) window.restore();
-  window.show();
-  window.focus();
+async function showWindow() {
+  if (quitAllowed) return;
+  if (!window) windowLoading = createWindow();
+  const view = window;
+  await windowLoading;
+  if (!smoke && window === view && !view.isDestroyed() && !quitAllowed) {
+    view.show();
+    view.focus();
+  }
+}
+
+function openDesktop() {
+  void showWindow().catch(console.error);
 }
 
 async function openLogs() {
@@ -163,7 +176,7 @@ function requestQuit() {
       tray?.destroy();
       app.quit();
     } catch (error) {
-      showWindow();
+      openDesktop();
       throw error;
     } finally {
       quitJob = null;
@@ -205,36 +218,42 @@ function registerIpc() {
 }
 
 async function createWindow() {
-  window = new BrowserWindow({
+  const view = new BrowserWindow({
     width: 1030, height: 775, minWidth: 650, minHeight: 540, show: false,
     icon: path.join(__dirname, 'assets', 'app.ico'),
     title: 'SideLantern', autoHideMenuBar: true, backgroundColor: nativeTheme.shouldUseDarkColors ? '#1b211e' : '#f5f7f4',
     webPreferences: {preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false}
   });
-  window.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
-  window.webContents.on('will-navigate', event => event.preventDefault());
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  window.webContents.session.setPermissionCheckHandler(() => false);
-  window.on('close', event => {
-    if (!quitAllowed) {event.preventDefault(); window.hide();}
+  window = view;
+  view.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
+  view.webContents.on('will-navigate', event => event.preventDefault());
+  view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  view.webContents.session.setPermissionCheckHandler(() => false);
+  view.on('minimize', () => view.close());
+  view.once('closed', () => {
+    window = undefined;
+    windowLoading = undefined;
   });
-  window.on('minimize', event => {event.preventDefault(); window.hide();});
-  await window.loadFile(rendererFile);
-  if (!smoke && !process.argv.includes('--tray')) showWindow();
+  try {
+    await view.loadFile(rendererFile);
+  } catch (error) {
+    if (!view.isDestroyed()) view.destroy();
+    throw error;
+  }
 }
 
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   tray = new Tray(icon);
   tray.setToolTip('SideLantern');
-  tray.on('click', showWindow);
+  tray.on('click', openDesktop);
   updateTrayMenu();
 }
 
 function updateTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    {label: translate(preferences.language, 'trayOpen'), click: showWindow},
+    {label: translate(preferences.language, 'trayOpen'), click: openDesktop},
     {type: 'separator'},
     {label: translate(preferences.language, 'trayExit'), click: () => {void requestQuit().catch(console.error);}}
   ]));
@@ -273,7 +292,7 @@ async function boot() {
   Menu.setApplicationMenu(null);
   registerIpc();
   if (!smoke) createTray();
-  await createWindow();
+  if (smoke || !process.argv.includes('--tray')) await showWindow();
   if (smoke) {
     const ready = await window.webContents.executeJavaScript('Boolean(window.sideLantern && document.querySelector("[data-panel=host]"))');
     if (!ready) throw new Error('Electron renderer did not initialize.');
@@ -290,12 +309,30 @@ async function boot() {
     if (localized !== 'en' || themed.phase !== 'running') {
       throw new Error('The running renderer did not apply the language change.');
     }
-    console.log(`SideLantern smoke passed: renderer, theme, language, authenticated API, private host on port ${port}.`);
+    const first = window;
+    const contents = first.webContents;
+    const closed = once(first, 'closed', {signal: AbortSignal.timeout(3000)});
+    first.emit('minimize');
+    await closed;
+    if (!contents.isDestroyed() || BrowserWindow.getAllWindows().length || host.getState().phase !== 'running') {
+      throw new Error('Minimizing did not release the renderer while keeping the host running.');
+    }
+    await showWindow();
+    const restored = await window.webContents.executeJavaScript('window.sideLantern.getState()');
+    if (restored.phase !== 'running' || restored.preferences.language !== 'en') {
+      throw new Error('The reopened window did not recover the host state.');
+    }
+    console.log(`SideLantern smoke passed: renderer release and restore, theme, language, authenticated API, private host on port ${port}.`);
     if (!process.argv.includes('--smoke-hold')) await requestQuit();
     return;
   }
   void host.start().then(() => refreshDisplay(true)).catch(error => console.error(error.message));
-  timer = setInterval(() => {void host.refresh(); void refreshDisplay();}, 2000);
+  timer = setInterval(() => {
+    if (window?.isVisible()) {
+      void host.refresh();
+      void refreshDisplay();
+    }
+  }, 2000);
   timer.unref();
 }
 
@@ -306,8 +343,9 @@ if (!app.requestSingleInstanceLock()) {
   } else app.quit();
 } else {
   app.on('second-instance', (_event, args) => {
-    if (!requestsMigration(args)) showWindow();
+    if (tray && !requestsMigration(args)) openDesktop();
   });
+  app.on('window-all-closed', () => {}); // The tray owns the desktop lifetime.
   app.on('before-quit', event => {
     if (quitAllowed) return;
     event.preventDefault();
